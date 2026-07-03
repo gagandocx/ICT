@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-005",
+  "type": "fix",
+  "description": "Address 3 issues from v2 semantic review: wire HTF data to premium/discount filter, fix daily P&L baseline desync, remove dead get_open_positions() call",
+  "status": "in_progress",
+  "steps": [
+    "In main.py run_live(): fetch D1 candles at startup and use detect_swing_points() to find HTF swing high/low, then call entry_model.set_htf_range(). Refresh periodically (on day change).",
+    "In backtester.py run(): derive running HTF context using a lookback window on the data to compute swing high/low and call entry_model.set_htf_range() before processing entry signals.",
+    "In main.py run_live(): convert _day_start_balance from function-attribute to local variable, reset it properly alongside daily_pnl at midnight.",
+    "In main.py run_live(): remove the dead get_open_positions() call and the unused known_tickets set, or wire them to actual position tracking."
+  ],
+  "acceptance_criteria": [
+    "set_htf_range() is called in main.py run_live() with values derived from D1 candle data",
+    "set_htf_range() is called in backtester.py with values derived from a lookback window",
+    "day_start_balance is a local variable that resets properly at midnight",
+    "No dead get_open_positions() call with an empty if block",
+    "All 106 existing tests still pass"
+  ],
+  "verification": [
+    "python3 -m pytest tests/ -v --tb=short",
+    "python3 -m py_compile main.py",
+    "python3 -m py_compile ict_bot/backtester.py"
+  ],
+  "blocked_reason": null,
+  "findings": null
+}

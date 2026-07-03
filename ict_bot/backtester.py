@@ -13,6 +13,7 @@ from datetime import datetime
 from ict_bot.entry_model import EntryModel
 from ict_bot.kill_zones import is_in_kill_zone, get_active_kill_zone
 from ict_bot.risk_management import calculate_position_size
+from ict_bot.market_structure import detect_swing_points
 
 
 class Backtester:
@@ -125,6 +126,29 @@ class Backtester:
         entry_model = EntryModel()
         active_trade = None
 
+        # --- HTF range derivation for premium/discount filter ---
+        # Build a daily OHLC summary from the 1m data to derive swing points.
+        # We use a 20-day lookback to compute HTF swing high/low, updating
+        # at the start of each new day in the main loop.
+        daily_ohlc = self._build_daily_ohlc(df)
+        htf_lookback = 20
+
+        def update_htf_range(entry_model_, daily_ohlc_, candle_day_):
+            """Update entry model's HTF range from daily OHLC up to candle_day."""
+            if daily_ohlc_ is None or daily_ohlc_.empty:
+                return
+            past_days = daily_ohlc_[daily_ohlc_["time"] < pd.Timestamp(candle_day_)]
+            if len(past_days) < 3:
+                return
+            recent = past_days.tail(htf_lookback)
+            swings = detect_swing_points(recent.reset_index(drop=True), lookback=2)
+            swing_highs = [s for s in swings if s["type"] == "swing_high"]
+            swing_lows = [s for s in swings if s["type"] == "swing_low"]
+            if swing_highs and swing_lows:
+                htf_high = max(s["price"] for s in swing_highs)
+                htf_low = min(s["price"] for s in swing_lows)
+                entry_model_.set_htf_range(htf_high, htf_low)
+
         for idx, row in df.iterrows():
             candle = {
                 "time": row["time"],
@@ -139,6 +163,8 @@ class Backtester:
             if candle_day and candle_day != current_day:
                 current_day = candle_day
                 daily_pnl = 0.0
+                # Update HTF swing range for premium/discount filter
+                update_htf_range(entry_model, daily_ohlc, candle_day)
 
             # Check if we have an active trade - simulate SL/TP hit
             if active_trade is not None:
@@ -393,3 +419,28 @@ class Backtester:
             "gross_profit": 0.0,
             "gross_loss": 0.0,
         }
+
+    def _build_daily_ohlc(self, df):
+        """
+        Aggregate 1-minute OHLC data into daily bars.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame with 'time', 'open', 'high', 'low', 'close' columns.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Daily OHLC DataFrame, or None if aggregation fails.
+        """
+        if df is None or df.empty:
+            return None
+        daily = df.set_index("time").resample("D").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+        }).dropna().reset_index()
+        daily.rename(columns={"time": "time"}, inplace=True)
+        return daily

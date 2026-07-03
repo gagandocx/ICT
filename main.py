@@ -204,8 +204,26 @@ def run_live(config):
 
     daily_pnl = 0.0
     current_day = datetime.now().date()
-    # Track known closed position tickets to compute daily P&L
-    known_tickets = set()
+    day_start_balance = None
+
+    # --- Fetch HTF (D1) candles at startup for premium/discount filter ---
+    def refresh_htf_range(connector_, symbol_, entry_model_):
+        """Fetch D1 candles and set the HTF swing range on the entry model."""
+        htf_candles = connector_.get_candles(symbol_, "D1", 20)
+        if htf_candles is not None and not htf_candles.empty:
+            swings = market_structure.detect_swing_points(htf_candles, lookback=3)
+            swing_highs = [s for s in swings if s["type"] == "swing_high"]
+            swing_lows = [s for s in swings if s["type"] == "swing_low"]
+            if swing_highs and swing_lows:
+                htf_high = max(s["price"] for s in swing_highs)
+                htf_low = min(s["price"] for s in swing_lows)
+                entry_model_.set_htf_range(htf_high, htf_low)
+                logger.log_analysis(
+                    "D1", "htf_range",
+                    f"HTF range set: high={htf_high}, low={htf_low}"
+                )
+
+    refresh_htf_range(connector, symbol, entry_model)
 
     print(f"ICT Trading Bot running for {symbol}")
     print("Press Ctrl+C to stop")
@@ -221,8 +239,10 @@ def run_live(config):
                 notifier.send_daily_summary(summary)
                 logger.reset_daily()
                 daily_pnl = 0.0
-                known_tickets.clear()
+                day_start_balance = None
                 current_day = now.date()
+                # Refresh HTF range at the start of each new day
+                refresh_htf_range(connector, symbol, entry_model)
 
             # Gate on connection - attempt reconnection if disconnected
             if not connector.connected:
@@ -253,28 +273,14 @@ def run_live(config):
                     )
                     break
 
-            # --- Update daily P&L from closed/open positions ---
-            positions = connector.get_open_positions()
-            if positions is not None:
-                # Track profit from positions that have been closed since last check.
-                # MT5 get_open_positions returns current open positions; we track
-                # realized P&L by monitoring account equity changes.
-                pass
-
-            # Update daily P&L from account info (equity - balance gives unrealized;
-            # we use profit field which shows realized + unrealized for open positions)
+            # --- Update daily P&L from account balance delta ---
             account_info = connector.get_account_info()
             if account_info is not None:
                 balance = account_info["balance"]
-                # The difference between current balance and start-of-day balance
-                # approximates realized P&L. For more precise tracking we record
-                # the starting balance and compute the delta.
-                if not hasattr(run_live, '_day_start_balance'):
-                    run_live._day_start_balance = balance
-                if now.date() != getattr(run_live, '_day_start_date', None):
-                    run_live._day_start_balance = balance
-                    run_live._day_start_date = now.date()
-                daily_pnl = balance - run_live._day_start_balance
+                # Initialize day_start_balance on first successful fetch of the day
+                if day_start_balance is None:
+                    day_start_balance = balance
+                daily_pnl = balance - day_start_balance
             else:
                 balance = 10000
 
