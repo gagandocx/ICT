@@ -2,7 +2,7 @@
   "id": "FEAT-004",
   "type": "fix",
   "description": "Address 7 issues from semantic review: wire premium/discount filter, integrate OTE/OB as confluence filters, fix daily P&L tracking in live mode, gate connector failure in live loop, cap candle buffer, document same-candle SL/TP bias, add env var override for credentials",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Wire premium/discount filter into entry_model.py generate_entry_signal() to reject long signals in premium and short signals in discount",
     "Integrate OTE and order_blocks as optional confluence filters in entry_model.py (check if entry price is in OTE zone or near an unmitigated OB)",
@@ -28,5 +28,5 @@
     "python3 -m py_compile main.py"
   ],
   "blocked_reason": null,
-  "findings": null
+  "findings": "All 7 review issues addressed. Premium/discount filter is a hard gate (rejects signals violating the rule). OTE and order_blocks are soft confluence flags (reported in signal dict but do not block entry). Daily P&L in live mode now tracked via balance delta from start-of-day. Live loop exits early on initial connection failure and attempts reconnection with backoff on mid-session disconnect. Buffer capped at 500 candles with sliding window. SL-first assumption documented in backtester. Env var overrides documented in config_example.yaml. All 106 existing tests pass unchanged."
 }
