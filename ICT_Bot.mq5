@@ -1449,8 +1449,15 @@ double CalculatePositionSize(double balance, double entry_price, double stop_los
    double risk_amount = balance * RiskPercent;
    double volume = risk_amount / (sl_distance * ContractSize);
    
-   // Normalize to 2 decimal places (matching Python behavior)
+   // Round to volume step of 0.01 (matching Python: round(volume / volume_step) * volume_step)
+   double volume_step = 0.01;
+   volume = MathRound(volume / volume_step) * volume_step;
    volume = NormalizeDouble(volume, 2);
+   
+   // Match Python: if volume < volume_min (0.01), return 0.0 (trade is invalid)
+   // Python returns valid=False and the backtester skips the trade entirely.
+   if(volume < 0.01)
+      return 0.0;
    
    return volume;
 }
@@ -1966,6 +1973,23 @@ void CheckForNewBar()
       g_daily_bars[g_daily_bar_count - 1].high  = g_current_daily_high;
       g_daily_bars[g_daily_bar_count - 1].low   = g_current_daily_low;
       g_daily_bars[g_daily_bar_count - 1].close = g_current_daily_close;
+      
+      // Cap the daily bars array to HTFLookback * 2 to prevent unbounded memory growth.
+      // UpdateHTFRange() only reads the last HTFLookback bars, so keeping 2x provides
+      // margin without changing behavior.
+      int max_daily_bars = HTFLookback * 2;
+      if(g_daily_bar_count > max_daily_bars)
+      {
+         int excess = g_daily_bar_count - max_daily_bars;
+         CandleData temp_daily[];
+         ArrayResize(temp_daily, max_daily_bars);
+         for(int i = 0; i < max_daily_bars; i++)
+            temp_daily[i] = g_daily_bars[i + excess];
+         ArrayResize(g_daily_bars, max_daily_bars);
+         for(int i = 0; i < max_daily_bars; i++)
+            g_daily_bars[i] = temp_daily[i];
+         g_daily_bar_count = max_daily_bars;
+      }
       
       if(DebugMode)
          Print("ICT Debug: [DAILY] Finalized daily bar #", g_daily_bar_count,
