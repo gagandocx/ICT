@@ -1,0 +1,38 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Rewrite the MQL5 EA (ICT_Bot.mq5) to match Python backtester behavior exactly. Five changes: (1) Build daily OHLC from M1 candles in memory instead of CopyRates(D1), skip P/D filter when < 3 daily bars accumulated; (2) Use TRADE_ACTION_DEAL (market execution) instead of TRADE_ACTION_PENDING limit orders; (3) Match Python position sizing exactly: volume = (balance * 0.01) / abs(entry - sl) with no broker min/max filtering; (4) Set HTFLookback=20 with swing lookback=2 on self-built daily bars; (5) Implement daily bar tracking from M1 data with proper day-boundary detection.",
+  "status": "in_progress",
+  "steps": [
+    "1. ADD a global daily OHLC tracking system in ICT_Bot.mq5: Add global arrays/variables to track daily bars built from M1 data (g_daily_bars[] as CandleData array, g_daily_bar_count, g_current_daily_open/high/low/close, g_current_daily_date). On each M1 candle, check if it is a new day - if so, finalize previous day bar into the array, start new day. Update current day's high=max(high,candle.high), low=min(low,candle.low), close=candle.close.",
+    "2. REWRITE UpdateHTFRange() to use g_daily_bars[] instead of CopyRates(PERIOD_D1). The function should: (a) check if g_daily_bar_count < 3, if so return without setting g_htf_range_valid (matching Python's 'if len(past_days) < 3: return'); (b) take the last min(20, g_daily_bar_count) bars from g_daily_bars[]; (c) run DetectSwingPoints on those daily bars with HTFSwingLookback=2; (d) find max swing_high and min swing_low; (e) set g_htf_swing_high/g_htf_swing_low/g_htf_range_valid.",
+    "3. Change the input parameter HTFLookback default from 5 to 20 to match Python's htf_lookback=20.",
+    "4. REWRITE PlaceLimitOrder() to become PlaceMarketOrder() using TRADE_ACTION_DEAL instead of TRADE_ACTION_PENDING. For long trades use ORDER_TYPE_BUY at current Ask; for short trades use ORDER_TYPE_SELL at current Bid. Set request.price to the appropriate market price (Ask for buy, Bid for sell). Keep SL and TP as before. This matches Python which immediately activates the trade at entry_price.",
+    "5. REWRITE CalculatePositionSize() to match Python exactly: volume = (balance * RiskPercent) / abs(entry_price - stop_loss_price). Remove VolumeStep rounding, remove VolumeMin/VolumeMax clamping, remove the 'return 0.0 if volume < VolumeMin' check. Just normalize to 2 decimal places. Always return the calculated volume (never 0 unless balance or sl_distance is 0).",
+    "6. Update the call in ProcessNewCandle: rename PlaceLimitOrder(signal) to PlaceMarketOrder(signal).",
+    "7. REMOVE the OnInit() call to UpdateHTFRange() since there are no daily bars accumulated yet at init time. The HTF range should only be computed when a new day starts and there are >= 3 accumulated daily bars.",
+    "8. In UpdateDailyPnL() where it currently calls UpdateHTFRange() on day change: keep this call but ensure it uses the new self-built daily bars logic. Also add daily bar tracking updates here or in CheckForNewBar().",
+    "9. Ensure g_htf_range_valid starts as false and only becomes true when at least 3 self-built daily bars exist AND swing detection finds both a swing_high and swing_low. This matches Python where P/D filter is simply skipped when HTF range is not set.",
+    "10. Update HasActiveTradeOrOrder() to only check positions (not pending orders) since we no longer use pending orders.",
+    "11. Remove or simplify CancelPendingOrders() since pending orders are no longer used.",
+    "12. Clean up: remove unused references to pending order logic in debug messages and comments."
+  ],
+  "acceptance_criteria": [
+    "Daily OHLC is built from M1 candles processed by the EA, not from CopyRates(D1)",
+    "P/D filter is skipped (g_htf_range_valid=false) until at least 3 daily bars have been accumulated from the test data",
+    "HTFLookback input defaults to 20, matching Python's htf_lookback=20",
+    "Trades are executed immediately via TRADE_ACTION_DEAL (market order), not TRADE_ACTION_PENDING (limit order)",
+    "Position sizing uses simple formula: volume = (balance * risk_percent) / abs(entry - sl) with no min/max filtering",
+    "The EA logic flow matches Python's backtester.py: build daily from M1 -> update HTF range on day change (only if >= 3 daily bars) -> process candle in kill zone -> immediate execution on signal",
+    "Code compiles as valid MQL5 syntax (verified by manual review)"
+  ],
+  "verification": [
+    "Run Python tests to confirm reference implementation unchanged: cd /projects/sandbox/ICT && python -m pytest tests/ -v",
+    "Review the MQL5 diff to confirm all 5 key changes are implemented correctly",
+    "Verify no CopyRates(PERIOD_D1) calls remain in the file",
+    "Verify TRADE_ACTION_PENDING is no longer used for trade entry",
+    "Verify CalculatePositionSize no longer has VolumeMin/VolumeMax filtering"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

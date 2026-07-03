@@ -33,10 +33,7 @@ input double   EqualLevelTolerance = 5.0;   // Equal level tolerance (points)
 input double   MinSweepPips     = 2.0;      // Min sweep distance (points)
 input int      MaxBufferSize    = 500;      // Max candle buffer size
 input double   ContractSize     = 1.0;      // Contract size for position sizing
-input double   VolumeMin        = 0.01;     // Minimum volume
-input double   VolumeMax        = 100.0;    // Maximum volume
-input double   VolumeStep       = 0.01;     // Volume step
-input int      HTFLookback      = 5;        // HTF daily candles for bias (5 = tighter recent range matching Python's effective behavior)
+input int      HTFLookback      = 20;       // HTF daily candles for bias (20 = matching Python's htf_lookback=20)
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
 input int      ServerUTCOffset  = 3;        // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset; 3 = Fusion Markets summer/UTC+3)
@@ -214,6 +211,19 @@ bool       g_has_active_trade = false;
 // Track the previous kill zone name for stale order cancellation
 // When transitioning to a DIFFERENT kill zone, cancel pending orders from prior zone
 string     g_previous_kill_zone = "";
+
+//+------------------------------------------------------------------+
+//| Daily OHLC Tracking (built from M1 data, NOT CopyRates)           |
+//| Corresponds to: backtester.py _build_daily_ohlc()                 |
+//+------------------------------------------------------------------+
+CandleData g_daily_bars[];        // Accumulated completed daily bars
+int        g_daily_bar_count = 0; // Number of completed daily bars
+double     g_current_daily_open  = 0.0;
+double     g_current_daily_high  = 0.0;
+double     g_current_daily_low   = 0.0;
+double     g_current_daily_close = 0.0;
+datetime   g_current_daily_date  = 0;  // Date (day) of the current daily bar being built
+bool       g_daily_bar_started   = false; // Whether we have started tracking a daily bar
 
 //+------------------------------------------------------------------+
 //| Kill Zone Time Windows (ET/Eastern Time)                           |
@@ -417,10 +427,9 @@ string GetActiveKillZone(datetime server_time)
 
 //+------------------------------------------------------------------+
 //| Cancel all unfilled pending orders for this EA                     |
-//| Corresponds to: Python backtester has no pending order concept;   |
-//| it sets active_trade immediately. This ensures the live EA does   |
-//| not accumulate stale limit orders from prior kill zones, keeping  |
-//| behavior consistent with the Python model.                        |
+//| Note: With market execution, pending orders are no longer created  |
+//| by this EA. This function is retained for safety in case any       |
+//| legacy orders exist, but should not be triggered in normal flow.   |
 //+------------------------------------------------------------------+
 void CancelPendingOrders()
 {
@@ -465,10 +474,8 @@ void ResetEntryModel()
    g_fvg_valid   = false;
    
    // NOTE: We do NOT call CancelPendingOrders() here.
-   // Previously this was called on every reset which would cancel orders
-   // that were JUST placed (since ProcessNewCandle calls ResetEntryModel
-   // after PlaceLimitOrder). Stale orders are now cancelled only when
-   // transitioning to a DIFFERENT kill zone - see CheckForNewBar().
+   // With market execution, there are no pending orders to cancel.
+   // Previously this was relevant with limit orders but is no longer needed.
 }
 
 //+------------------------------------------------------------------+
@@ -1428,9 +1435,9 @@ bool GenerateEntrySignal(EntrySignal &signal, string kz_name)
 //| Position Sizing                                                    |
 //| Corresponds to: risk_management.py calculate_position_size()      |
 //|                                                                    |
-//| volume = (balance * risk_percent) / (sl_distance * contract_size) |
-//| Round to volume_step, clamp to [volume_min, volume_max]           |
-//| Skip if volume < volume_min                                       |
+//| Python formula: volume = risk_amount / (sl_distance * contract_size)|
+//| where risk_amount = balance * 0.01, contract_size = 1.0           |
+//| No broker min/max filtering - just normalize to 2 decimal places. |
 //+------------------------------------------------------------------+
 double CalculatePositionSize(double balance, double entry_price, double stop_loss_price)
 {
@@ -1442,18 +1449,8 @@ double CalculatePositionSize(double balance, double entry_price, double stop_los
    double risk_amount = balance * RiskPercent;
    double volume = risk_amount / (sl_distance * ContractSize);
    
-   // Round to volume step
-   if(VolumeStep > 0)
-      volume = MathRound(volume / VolumeStep) * VolumeStep;
-   
-   // Normalize precision
+   // Normalize to 2 decimal places (matching Python behavior)
    volume = NormalizeDouble(volume, 2);
-   
-   // Clamp
-   if(volume < VolumeMin)
-      return 0.0; // Skip trade - below minimum
-   if(volume > VolumeMax)
-      volume = VolumeMax;
    
    return volume;
 }
@@ -1473,36 +1470,42 @@ bool IsDailyLossLimitReached()
 }
 
 //+------------------------------------------------------------------+
-//| Update HTF Range (Daily timeframe bias)                            |
+//| Update HTF Range (Daily timeframe bias from self-built bars)       |
 //| Corresponds to: backtester.py update_htf_range()                  |
 //|                                                                    |
-//| Fetch 20 D1 candles, detect swing points with lookback=2,         |
+//| Uses g_daily_bars[] built from M1 data (NOT CopyRates D1).       |
+//| If < 3 daily bars accumulated, skip (P/D filter won't apply).    |
+//| Take the last min(HTFLookback, g_daily_bar_count) bars,           |
+//| detect swing points with lookback=2,                              |
 //| set HTF range: htf_high = max of all swing_high prices;           |
 //|                htf_low = min of all swing_low prices               |
 //+------------------------------------------------------------------+
 void UpdateHTFRange()
 {
-   // Copy daily candles
-   CandleData daily_candles[];
-   ArrayResize(daily_candles, HTFLookback);
-   
-   MqlRates rates[];
-   int copied = CopyRates(_Symbol, PERIOD_D1, 1, HTFLookback, rates);
-   if(copied < 3) return;
-   
-   ArrayResize(daily_candles, copied);
-   for(int i = 0; i < copied; i++)
+   // Match Python: if len(past_days) < 3: return
+   if(g_daily_bar_count < 3)
    {
-      daily_candles[i].time  = rates[i].time;
-      daily_candles[i].open  = rates[i].open;
-      daily_candles[i].high  = rates[i].high;
-      daily_candles[i].low   = rates[i].low;
-      daily_candles[i].close = rates[i].close;
+      if(DebugMode)
+         Print("ICT Debug: [HTF] Skipping UpdateHTFRange - only ", g_daily_bar_count,
+               " daily bars accumulated (need >= 3)");
+      return;
    }
    
-   // Detect swing points with HTF lookback (2)
+   // Take the last min(HTFLookback, g_daily_bar_count) bars
+   int bars_to_use = MathMin(HTFLookback, g_daily_bar_count);
+   
+   CandleData daily_candles[];
+   ArrayResize(daily_candles, bars_to_use);
+   
+   int start_idx = g_daily_bar_count - bars_to_use;
+   for(int i = 0; i < bars_to_use; i++)
+   {
+      daily_candles[i] = g_daily_bars[start_idx + i];
+   }
+   
+   // Detect swing points with HTF swing lookback (2)
    SwingPoint swings[];
-   int swing_count = DetectSwingPoints(daily_candles, copied, HTFSwingLookback, swings);
+   int swing_count = DetectSwingPoints(daily_candles, bars_to_use, HTFSwingLookback, swings);
    
    if(swing_count == 0) return;
    
@@ -1530,17 +1533,25 @@ void UpdateHTFRange()
       g_htf_swing_high  = max_high;
       g_htf_swing_low   = min_low;
       g_htf_range_valid = true;
+      
+      if(DebugMode)
+         Print("ICT Debug: [HTF] Range updated from self-built daily bars",
+               " | BarsUsed=", bars_to_use,
+               " | TotalBars=", g_daily_bar_count,
+               " | High=", DoubleToString(max_high, _Digits),
+               " | Low=", DoubleToString(min_low, _Digits));
    }
 }
 
 //+------------------------------------------------------------------+
-//| Place Limit Order                                                  |
-//| Corresponds to: backtester.py trade execution via OrderSend       |
+//| Place Market Order (Immediate Execution)                           |
+//| Corresponds to: backtester.py trade execution - Python immediately |
+//| activates trades at entry_price (no pending order concept).       |
 //|                                                                    |
-//| BUY_LIMIT or SELL_LIMIT at entry_price with SL and TP            |
-//| Comment format: "ICT_<kill_zone_name>"                            |
+//| Uses TRADE_ACTION_DEAL with ORDER_TYPE_BUY/SELL at market price.  |
+//| For long: ORDER_TYPE_BUY at Ask; For short: ORDER_TYPE_SELL at Bid|
 //+------------------------------------------------------------------+
-bool PlaceLimitOrder(const EntrySignal &signal)
+bool PlaceMarketOrder(const EntrySignal &signal)
 {
    double volume = CalculatePositionSize(AccountInfoDouble(ACCOUNT_BALANCE),
                                           signal.entry_price, signal.stop_loss);
@@ -1552,32 +1563,36 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    ZeroMemory(request);
    ZeroMemory(result);
    
-   request.action   = TRADE_ACTION_PENDING;
+   request.action   = TRADE_ACTION_DEAL;
    request.symbol   = _Symbol;
    request.volume   = volume;
-   request.price    = NormalizeDouble(signal.entry_price, _Digits);
    request.sl       = NormalizeDouble(signal.stop_loss, _Digits);
    request.tp       = NormalizeDouble(signal.take_profit, _Digits);
    request.magic    = 20240101; // Magic number for ICT Bot
    request.comment  = "ICT_" + signal.kill_zone_name;
-   request.type_time = ORDER_TIME_GTC;
    
    if(signal.direction == "long")
-      request.type = ORDER_TYPE_BUY_LIMIT;
+   {
+      request.type  = ORDER_TYPE_BUY;
+      request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   }
    else
-      request.type = ORDER_TYPE_SELL_LIMIT;
+   {
+      request.type  = ORDER_TYPE_SELL;
+      request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   }
    
-   // Set deviation
+   // Set deviation (slippage tolerance)
    request.deviation = 10;
    
-   // ORDER_FILLING_RETURN is always valid for pending orders (BUY_LIMIT/SELL_LIMIT)
-   request.type_filling = ORDER_FILLING_RETURN;
+   // Use IOC filling for market orders (most widely supported)
+   request.type_filling = ORDER_FILLING_IOC;
    
    bool sent = OrderSend(request, result);
    
    if(sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
    {
-      Print("ICT Bot: Order placed - ", signal.direction, " @ ", signal.entry_price,
+      Print("ICT Bot: Market order executed - ", signal.direction, " @ ", request.price,
             " SL: ", signal.stop_loss, " TP: ", signal.take_profit,
             " Vol: ", volume, " KZ: ", signal.kill_zone_name,
             " OTE: ", (signal.ote_confluence ? "Yes" : "No"),
@@ -1586,10 +1601,10 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    }
    else
    {
-      Print("ICT Bot: Order FAILED - retcode: ", result.retcode,
+      Print("ICT Bot: Market order FAILED - retcode: ", result.retcode,
             " | comment: ", result.comment,
             " | dir: ", signal.direction,
-            " | price: ", DoubleToString(signal.entry_price, _Digits),
+            " | price: ", DoubleToString(request.price, _Digits),
             " | sl: ", DoubleToString(signal.stop_loss, _Digits),
             " | tp: ", DoubleToString(signal.take_profit, _Digits),
             " | vol: ", DoubleToString(volume, 2),
@@ -1601,27 +1616,17 @@ bool PlaceLimitOrder(const EntrySignal &signal)
 }
 
 //+------------------------------------------------------------------+
-//| Check if we have any active positions or pending orders            |
+//| Check if we have any active positions                               |
+//| Since we now use market orders (not pending), only check positions.|
 //+------------------------------------------------------------------+
 bool HasActiveTradeOrOrder()
 {
-   // Check positions
+   // Check positions only (no pending orders since we use market execution)
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(PositionGetSymbol(i) == _Symbol)
       {
          if(PositionGetInteger(POSITION_MAGIC) == 20240101)
-            return true;
-      }
-   }
-   
-   // Check pending orders
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      if(OrderSelect(OrderGetTicket(i)))
-      {
-         if(OrderGetString(ORDER_SYMBOL) == _Symbol
-            && OrderGetInteger(ORDER_MAGIC) == 20240101)
             return true;
       }
    }
@@ -1646,9 +1651,9 @@ void UpdateDailyPnL()
       g_daily_pnl = 0.0;
       g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
       
-      // Update HTF range at start of each day
-      // Corresponds to: backtester.py update_htf_range() call on day change
-      UpdateHTFRange();
+      // Note: UpdateHTFRange() is now called from the daily bar tracking logic
+      // in CheckForNewBar() when a new day boundary is detected and the previous
+      // daily bar is finalized. We no longer call it here to avoid duplicate calls.
    }
    
    // Calculate today's realized PnL from deal history
@@ -1723,12 +1728,12 @@ void ProcessNewCandle(const CandleData &candle, string kz_name)
                      " | OTE=", (signal.ote_confluence ? "Yes" : "No"),
                      " | OB=", (signal.ob_confluence ? "Yes" : "No"));
             
-            PlaceLimitOrder(signal);
+            PlaceMarketOrder(signal);
             
             // BUG 3 FIX: Mark that we have an active trade immediately after
             // placing the order. Without this, the EA would continue looking for
             // new entries on subsequent candles until HasActiveTradeOrOrder()
-            // detected the pending order on the next tick.
+            // detected the position on the next tick.
             g_has_active_trade = true;
          }
       }
@@ -1777,8 +1782,11 @@ int OnInit()
    else
       Print("ICT Bot: Running in Strategy Tester - timer disabled, using OnTick only");
    
-   // Initial HTF range update
-   UpdateHTFRange();
+   // NOTE: We do NOT call UpdateHTFRange() here because no daily bars have been
+   // accumulated from M1 data yet. The HTF range will only be computed when
+   // enough daily bars (>= 3) have been built from the M1 candle stream.
+   // This matches Python's behavior where the P/D filter is simply skipped
+   // until sufficient daily data exists.
    
    // Log initialization details including timezone info
    int broker_offset_sec = GetBrokerUTCOffsetSeconds();
@@ -1913,6 +1921,80 @@ void CheckForNewBar()
    candle.low   = rates[0].low;
    candle.close = rates[0].close;
    
+   // --- Daily OHLC Tracking from M1 data ---
+   // Corresponds to: backtester.py _build_daily_ohlc()
+   // Detect day boundaries by comparing the day of the current candle to the
+   // day of the bar being tracked. When a new day starts, finalize the previous
+   // day's bar into g_daily_bars[] and start a new daily bar.
+   MqlDateTime candle_mdt;
+   TimeToStruct(candle.time, candle_mdt);
+   int candle_day = candle_mdt.day_of_year;
+   int candle_year = candle_mdt.year;
+   
+   // Create a unique day identifier (year * 1000 + day_of_year)
+   int candle_day_id = candle_year * 1000 + candle_day;
+   
+   MqlDateTime current_daily_mdt;
+   int current_daily_day_id = 0;
+   if(g_daily_bar_started)
+   {
+      TimeToStruct(g_current_daily_date, current_daily_mdt);
+      current_daily_day_id = current_daily_mdt.year * 1000 + current_daily_mdt.day_of_year;
+   }
+   
+   if(!g_daily_bar_started)
+   {
+      // First candle ever - start tracking the first daily bar
+      g_current_daily_open  = candle.open;
+      g_current_daily_high  = candle.high;
+      g_current_daily_low   = candle.low;
+      g_current_daily_close = candle.close;
+      g_current_daily_date  = candle.time;
+      g_daily_bar_started   = true;
+      
+      if(DebugMode)
+         Print("ICT Debug: [DAILY] Started first daily bar tracking",
+               " | Date=", TimeToString(candle.time, TIME_DATE));
+   }
+   else if(candle_day_id != current_daily_day_id)
+   {
+      // New day detected - finalize the previous daily bar
+      g_daily_bar_count++;
+      ArrayResize(g_daily_bars, g_daily_bar_count);
+      g_daily_bars[g_daily_bar_count - 1].time  = g_current_daily_date;
+      g_daily_bars[g_daily_bar_count - 1].open  = g_current_daily_open;
+      g_daily_bars[g_daily_bar_count - 1].high  = g_current_daily_high;
+      g_daily_bars[g_daily_bar_count - 1].low   = g_current_daily_low;
+      g_daily_bars[g_daily_bar_count - 1].close = g_current_daily_close;
+      
+      if(DebugMode)
+         Print("ICT Debug: [DAILY] Finalized daily bar #", g_daily_bar_count,
+               " | Date=", TimeToString(g_current_daily_date, TIME_DATE),
+               " | O=", DoubleToString(g_current_daily_open, _Digits),
+               " | H=", DoubleToString(g_current_daily_high, _Digits),
+               " | L=", DoubleToString(g_current_daily_low, _Digits),
+               " | C=", DoubleToString(g_current_daily_close, _Digits));
+      
+      // Update HTF range now that we have a new completed daily bar
+      UpdateHTFRange();
+      
+      // Start new daily bar
+      g_current_daily_open  = candle.open;
+      g_current_daily_high  = candle.high;
+      g_current_daily_low   = candle.low;
+      g_current_daily_close = candle.close;
+      g_current_daily_date  = candle.time;
+   }
+   else
+   {
+      // Same day - update high, low, close
+      if(candle.high > g_current_daily_high)
+         g_current_daily_high = candle.high;
+      if(candle.low < g_current_daily_low)
+         g_current_daily_low = candle.low;
+      g_current_daily_close = candle.close;
+   }
+   
    // Update daily PnL tracking
    UpdateDailyPnL();
    
@@ -1969,15 +2051,13 @@ void CheckForNewBar()
    }
    
    // Cancel stale pending orders when transitioning to a DIFFERENT kill zone.
-   // This prevents leftover limit orders from a prior session lingering, while
-   // NOT cancelling orders placed within the SAME kill zone (which was the bug:
-   // ResetEntryModel used to call CancelPendingOrders on every reset, including
-   // immediately after PlaceLimitOrder).
+   // With market execution, this should rarely find any orders, but is kept
+   // as a safety measure in case of partial fills or broker-side pending orders.
    if(g_previous_kill_zone != "" && g_previous_kill_zone != kz_name)
    {
       if(DebugMode)
          Print("ICT Debug: [KZ TRANSITION] ", g_previous_kill_zone, " -> ", kz_name,
-               " | Cancelling stale pending orders from prior kill zone");
+               " | Checking for any stale orders from prior kill zone");
       CancelPendingOrders();
    }
    g_previous_kill_zone = kz_name;

@@ -1,0 +1,22 @@
+{
+  "project_type": "MQL5 Expert Advisor with Python backtester reference implementation",
+  "language": "MQL5 (primary target), Python (reference)",
+  "build_system": "MetaTrader 5 compiler (not available in sandbox) - validation via AST/syntax review only",
+  "test_framework": "pytest for Python tests in tests/ directory; MQL5 has no automated test runner available",
+  "build_command": "N/A - MQL5 compiler not available in sandbox",
+  "test_command": "cd /projects/sandbox/ICT && python -m pytest tests/ -v",
+  "verification_instructions": "Since MQL5 compiler is not available, verification is: 1) ensure the MQL5 code changes are syntactically valid MQL5, 2) run Python tests to confirm reference logic unchanged, 3) review diff for logical correctness against Python reference",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "pip install pandas numpy pytest (already available for Python)",
+  "environment_constraints": "MQL5 compiler (MetaEditor) not available in sandbox. Cannot compile or run the EA. All MQL5 changes must be validated by code review against Python reference. Network mode: repository access only.",
+  "contribution_requirements": "Commit to main branch, do NOT push",
+  "key_patterns": "The MQL5 EA (ICT_Bot.mq5) replicates the Python ICT bot logic. Key mapping: backtester.py run loop = CheckForNewBar/ProcessNewCandle, entry_model.py = state machine (g_state), market_structure.py = DetectSwingPoints/DetectMSS, liquidity.py = DetectEqualLevels/DetectLiquiditySweeps, fvg.py = DetectFVG, risk_management.py = CalculatePositionSize",
+  "relevant_files": [
+    "/projects/sandbox/ICT/ICT_Bot.mq5",
+    "/projects/sandbox/ICT/ict_bot/backtester.py",
+    "/projects/sandbox/ICT/ict_bot/entry_model.py",
+    "/projects/sandbox/ICT/ict_bot/risk_management.py",
+    "/projects/sandbox/ICT/ict_bot/market_structure.py"
+  ],
+  "directory_structure": "ICT_Bot.mq5 (main MQL5 EA), ict_bot/ (Python modules: backtester, entry_model, market_structure, liquidity, fvg, etc.), tests/ (pytest tests), config/ (settings.yaml)"
+}

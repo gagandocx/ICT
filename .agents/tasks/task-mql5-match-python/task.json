@@ -1,0 +1,7 @@
+{
+  "task_id": "task-mql5-match-python",
+  "task_description": "Modify MQL5 EA (ICT_Bot.mq5) to exactly match the Python backtester behavior: build daily OHLC from M1 data, use market orders instead of limit orders, match position sizing formula, set HTF lookback to 20, and skip P/D filter until 3+ daily bars exist.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}
