@@ -427,9 +427,9 @@ string GetActiveKillZone(datetime server_time)
 
 //+------------------------------------------------------------------+
 //| Cancel all unfilled pending orders for this EA                     |
-//| Note: With market execution, pending orders are no longer created  |
-//| by this EA. This function is retained for safety in case any       |
-//| legacy orders exist, but should not be triggered in normal flow.   |
+//| Called when transitioning between kill zones to remove stale       |
+//| limit orders from a prior session. NOT called from ResetEntryModel |
+//| so that orders placed within the current zone remain active.       |
 //+------------------------------------------------------------------+
 void CancelPendingOrders()
 {
@@ -474,8 +474,10 @@ void ResetEntryModel()
    g_fvg_valid   = false;
    
    // NOTE: We do NOT call CancelPendingOrders() here.
-   // With market execution, there are no pending orders to cancel.
-   // Previously this was relevant with limit orders but is no longer needed.
+   // Limit orders must stay active after reset so they can still fill at the
+   // FVG midpoint. Previously, cancelling here caused orders to self-cancel
+   // before they had a chance to fill (the kill zone would end, triggering a
+   // reset, which removed the pending order placed moments earlier).
 }
 
 //+------------------------------------------------------------------+
@@ -1551,14 +1553,20 @@ void UpdateHTFRange()
 }
 
 //+------------------------------------------------------------------+
-//| Place Market Order (Immediate Execution)                           |
-//| Corresponds to: backtester.py trade execution - Python immediately |
-//| activates trades at entry_price (no pending order concept).       |
+//| Place Limit Order at FVG Midpoint                                  |
+//| Corresponds to: backtester.py trade execution - Python enters      |
+//| exactly at entry_price (FVG midpoint). To match this behavior in  |
+//| live/tester, we use pending LIMIT orders at the exact midpoint    |
+//| rather than market orders which fill at Ask/Bid (spread causes    |
+//| slippage that flips tight R:R trades from wins to losses).        |
 //|                                                                    |
-//| Uses TRADE_ACTION_DEAL with ORDER_TYPE_BUY/SELL at market price.  |
-//| For long: ORDER_TYPE_BUY at Ask; For short: ORDER_TYPE_SELL at Bid|
+//| Uses TRADE_ACTION_PENDING with BUY_LIMIT/SELL_LIMIT.              |
+//| SL and TP are attached to the order so once filled, exits are     |
+//| automatic.                                                        |
+//| ORDER_FILLING_RETURN: remainder stays as pending if partial fill. |
+//| ORDER_TIME_GTC: order stays active until filled or cancelled.     |
 //+------------------------------------------------------------------+
-bool PlaceMarketOrder(const EntrySignal &signal)
+bool PlaceLimitOrder(const EntrySignal &signal)
 {
    double volume = CalculatePositionSize(AccountInfoDouble(ACCOUNT_BALANCE),
                                           signal.entry_price, signal.stop_loss);
@@ -1570,9 +1578,10 @@ bool PlaceMarketOrder(const EntrySignal &signal)
    ZeroMemory(request);
    ZeroMemory(result);
    
-   request.action   = TRADE_ACTION_DEAL;
+   request.action   = TRADE_ACTION_PENDING;
    request.symbol   = _Symbol;
    request.volume   = volume;
+   request.price    = NormalizeDouble(signal.entry_price, _Digits); // FVG midpoint
    request.sl       = NormalizeDouble(signal.stop_loss, _Digits);
    request.tp       = NormalizeDouble(signal.take_profit, _Digits);
    request.magic    = 20240101; // Magic number for ICT Bot
@@ -1580,38 +1589,39 @@ bool PlaceMarketOrder(const EntrySignal &signal)
    
    if(signal.direction == "long")
    {
-      request.type  = ORDER_TYPE_BUY;
-      request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      request.type = ORDER_TYPE_BUY_LIMIT;
    }
    else
    {
-      request.type  = ORDER_TYPE_SELL;
-      request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      request.type = ORDER_TYPE_SELL_LIMIT;
    }
    
-   // Set deviation (slippage tolerance)
-   request.deviation = 10;
+   // RETURN filling: if partially filled, remainder stays as pending order
+   request.type_filling = ORDER_FILLING_RETURN;
    
-   // Use IOC filling for market orders (most widely supported)
-   request.type_filling = ORDER_FILLING_IOC;
+   // GTC: order stays active until filled or explicitly cancelled
+   request.type_time = ORDER_TIME_GTC;
    
    bool sent = OrderSend(request, result);
    
    if(sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
    {
-      Print("ICT Bot: Market order executed - ", signal.direction, " @ ", request.price,
-            " SL: ", signal.stop_loss, " TP: ", signal.take_profit,
-            " Vol: ", volume, " KZ: ", signal.kill_zone_name,
+      Print("ICT Bot: Limit order placed - ", signal.direction,
+            " @ ", DoubleToString(signal.entry_price, _Digits),
+            " SL: ", DoubleToString(signal.stop_loss, _Digits),
+            " TP: ", DoubleToString(signal.take_profit, _Digits),
+            " Vol: ", DoubleToString(volume, 2),
+            " KZ: ", signal.kill_zone_name,
             " OTE: ", (signal.ote_confluence ? "Yes" : "No"),
             " OB: ", (signal.ob_confluence ? "Yes" : "No"));
       return true;
    }
    else
    {
-      Print("ICT Bot: Market order FAILED - retcode: ", result.retcode,
+      Print("ICT Bot: Limit order FAILED - retcode: ", result.retcode,
             " | comment: ", result.comment,
             " | dir: ", signal.direction,
-            " | price: ", DoubleToString(request.price, _Digits),
+            " | price: ", DoubleToString(signal.entry_price, _Digits),
             " | sl: ", DoubleToString(signal.stop_loss, _Digits),
             " | tp: ", DoubleToString(signal.take_profit, _Digits),
             " | vol: ", DoubleToString(volume, 2),
@@ -1623,17 +1633,30 @@ bool PlaceMarketOrder(const EntrySignal &signal)
 }
 
 //+------------------------------------------------------------------+
-//| Check if we have any active positions                               |
-//| Since we now use market orders (not pending), only check positions.|
+//| Check if we have any active positions or pending orders            |
+//| With limit orders, a pending order counts as "active" so we do    |
+//| not place duplicate entries while waiting for a fill.             |
 //+------------------------------------------------------------------+
 bool HasActiveTradeOrOrder()
 {
-   // Check positions only (no pending orders since we use market execution)
+   // Check open positions
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(PositionGetSymbol(i) == _Symbol)
       {
          if(PositionGetInteger(POSITION_MAGIC) == 20240101)
+            return true;
+      }
+   }
+   
+   // Check pending orders (BUY_LIMIT/SELL_LIMIT waiting to be filled)
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && OrderSelect(ticket))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol
+            && OrderGetInteger(ORDER_MAGIC) == 20240101)
             return true;
       }
    }
@@ -1735,7 +1758,7 @@ void ProcessNewCandle(const CandleData &candle, string kz_name)
                      " | OTE=", (signal.ote_confluence ? "Yes" : "No"),
                      " | OB=", (signal.ob_confluence ? "Yes" : "No"));
             
-            PlaceMarketOrder(signal);
+            PlaceLimitOrder(signal);
             
             // BUG 3 FIX: Mark that we have an active trade immediately after
             // placing the order. Without this, the EA would continue looking for
@@ -2075,13 +2098,13 @@ void CheckForNewBar()
    }
    
    // Cancel stale pending orders when transitioning to a DIFFERENT kill zone.
-   // With market execution, this should rarely find any orders, but is kept
-   // as a safety measure in case of partial fills or broker-side pending orders.
+   // Limit orders from a prior kill zone should not remain active when the
+   // market moves into a new session with potentially different directional bias.
    if(g_previous_kill_zone != "" && g_previous_kill_zone != kz_name)
    {
       if(DebugMode)
          Print("ICT Debug: [KZ TRANSITION] ", g_previous_kill_zone, " -> ", kz_name,
-               " | Checking for any stale orders from prior kill zone");
+               " | Cancelling stale pending orders from prior kill zone");
       CancelPendingOrders();
    }
    g_previous_kill_zone = kz_name;
