@@ -4,6 +4,12 @@ Backtesting Engine Module - Historical Data Replay
 Replays historical 1m OHLC data through the entry model to simulate
 trading performance. Operates only during kill zone windows and
 tracks comprehensive performance metrics.
+
+Supports two input formats:
+  1. Standard OHLC: columns time, open, high, low, close
+  2. MT5 tick data: columns time_msc, bid, ask, last, volume, flags, flags_str, volume_real
+     - time_msc is a millisecond epoch timestamp
+     - Tick data is automatically converted to 1-minute OHLC candles using mid price (bid+ask)/2
 """
 
 import pandas as pd
@@ -14,6 +20,11 @@ from ict_bot.entry_model import EntryModel
 from ict_bot.kill_zones import is_in_kill_zone, get_active_kill_zone
 from ict_bot.risk_management import calculate_position_size
 from ict_bot.market_structure import detect_swing_points
+
+
+# Column sets used for auto-detection of data format
+_TICK_COLUMNS = {"time_msc", "bid", "ask"}
+_OHLC_COLUMNS = {"time", "open", "high", "low", "close"}
 
 
 class Backtester:
@@ -46,14 +57,20 @@ class Backtester:
 
     def load_data(self, csv_file_or_dataframe):
         """
-        Load historical OHLC data for backtesting.
+        Load historical data for backtesting.
+
+        Accepts either standard OHLC data or MT5 tick data.  The format is
+        auto-detected based on column headers:
+          - If columns include 'time_msc', 'bid', 'ask' -> tick data
+          - If columns include 'time', 'open', 'high', 'low', 'close' -> OHLC data
+
+        For tick data, ticks are aggregated into 1-minute OHLC candles using
+        the mid price ((bid + ask) / 2).
 
         Parameters
         ----------
         csv_file_or_dataframe : str or pd.DataFrame
             Either a path to a CSV file or a pandas DataFrame.
-            Must contain columns: time, open, high, low, close.
-            The 'time' column should be parseable as datetime.
 
         Returns
         -------
@@ -61,28 +78,89 @@ class Backtester:
             True if data loaded successfully, False otherwise.
         """
         if isinstance(csv_file_or_dataframe, pd.DataFrame):
-            self.data = csv_file_or_dataframe.copy()
+            raw = csv_file_or_dataframe.copy()
         elif isinstance(csv_file_or_dataframe, str):
             try:
-                self.data = pd.read_csv(csv_file_or_dataframe)
+                raw = pd.read_csv(csv_file_or_dataframe)
             except (FileNotFoundError, pd.errors.EmptyDataError):
                 return False
         else:
             return False
 
-        # Ensure required columns exist
+        # Auto-detect format based on column headers
+        columns = set(raw.columns)
+
+        if _TICK_COLUMNS.issubset(columns):
+            # Tick data format
+            raw = self._convert_ticks_to_ohlc(raw)
+            if raw is None or raw.empty:
+                self.data = None
+                return False
+        elif _OHLC_COLUMNS.issubset(columns):
+            # Standard OHLC format -- ensure required columns
+            pass
+        else:
+            self.data = None
+            return False
+
+        # Ensure required OHLC columns exist after any conversion
         required_cols = ["time", "open", "high", "low", "close"]
         for col in required_cols:
-            if col not in self.data.columns:
+            if col not in raw.columns:
                 self.data = None
                 return False
 
         # Parse time column
-        if not pd.api.types.is_datetime64_any_dtype(self.data["time"]):
-            self.data["time"] = pd.to_datetime(self.data["time"])
+        if not pd.api.types.is_datetime64_any_dtype(raw["time"]):
+            raw["time"] = pd.to_datetime(raw["time"])
 
-        self.data = self.data.sort_values("time").reset_index(drop=True)
+        self.data = raw.sort_values("time").reset_index(drop=True)
         return True
+
+    @staticmethod
+    def _convert_ticks_to_ohlc(tick_df):
+        """
+        Convert tick data to 1-minute OHLC candles.
+
+        Uses the mid price ((bid + ask) / 2) for aggregation.  The time_msc
+        column (millisecond epoch timestamp) is converted to a datetime index
+        before resampling.
+
+        Parameters
+        ----------
+        tick_df : pd.DataFrame
+            DataFrame with at least columns: time_msc, bid, ask.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns: time, open, high, low, close.
+            Returns None if conversion fails.
+        """
+        try:
+            df = tick_df.copy()
+
+            # Convert millisecond epoch to datetime
+            df["time"] = pd.to_datetime(df["time_msc"], unit="ms", utc=True)
+
+            # Compute mid price
+            df["mid"] = (df["bid"].astype(float) + df["ask"].astype(float)) / 2.0
+
+            # Resample to 1-minute candles
+            df = df.set_index("time")
+            ohlc = df["mid"].resample("1min").agg(
+                open="first",
+                high="max",
+                low="min",
+                close="last",
+            ).dropna().reset_index()
+
+            # Remove timezone info so downstream code works uniformly
+            ohlc["time"] = ohlc["time"].dt.tz_localize(None)
+
+            return ohlc
+        except (KeyError, ValueError, TypeError):
+            return None
 
     def run(self, start_date=None, end_date=None):
         """

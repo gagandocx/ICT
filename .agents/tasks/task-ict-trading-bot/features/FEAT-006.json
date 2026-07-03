@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-006",
+  "type": "fix",
+  "description": "Update backtester to accept MT5 tick data format (time_msc,bid,ask,...) and auto-detect data format. Convert ticks to 1-minute OHLC candles internally. Update config/settings.yaml.",
+  "status": "in_progress",
+  "steps": [
+    "Modify backtester.py load_data() to auto-detect tick data vs OHLC data based on column headers",
+    "Add tick-to-OHLC conversion using bid price (or mid price) to 1-minute candles",
+    "Handle time_msc (millisecond epoch) to datetime conversion",
+    "Create config/settings.yaml with backtest section pointing to the tick data file",
+    "Add tests for tick data loading and conversion"
+  ],
+  "acceptance_criteria": [
+    "Backtester accepts tick data format with columns time_msc,bid,ask,last,volume,flags,flags_str,volume_real",
+    "Tick data is converted to 1-minute OHLC candles using mid price (bid+ask)/2",
+    "time_msc millisecond epoch timestamps are properly converted to datetime",
+    "OHLC data format still works as before (auto-detection)",
+    "config/settings.yaml created with correct backtest configuration",
+    "All existing tests pass plus new tick data tests"
+  ],
+  "verification": [
+    "python3 -m pytest tests/ -v --tb=short",
+    "python3 -m py_compile ict_bot/backtester.py"
+  ],
+  "blocked_reason": null,
+  "findings": null
+}

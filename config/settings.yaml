@@ -1,0 +1,5 @@
+## Backtesting settings
+backtest:
+  data_file: NAS100_RealTicks_20260601_20260630
+  start_date: '2026-06-01'
+  end_date: '2026-06-30'
