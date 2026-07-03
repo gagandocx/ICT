@@ -227,6 +227,15 @@ class Backtester:
         """
         Check if a trade hits SL or TP on the current candle.
 
+        NOTE: Same-candle SL/TP priority assumption
+        When both stop loss and take profit are within a single candle's range,
+        this method checks SL first and records a loss. In real markets, the
+        fill order is ambiguous when both levels are breached in one candle.
+        This conservative (SL-first) approach biases backtest results slightly
+        pessimistically. For NAS100 on 1-minute data during volatile sessions,
+        same-candle SL/TP breach is plausible. A future enhancement could offer
+        configurable modes (conservative SL-first vs optimistic TP-first).
+
         Parameters
         ----------
         trade : dict

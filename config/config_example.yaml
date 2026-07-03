@@ -1,9 +1,15 @@
+## MetaTrader 5 Connection
+## Sensitive values can be overridden via environment variables:
+##   ICT_MT5_LOGIN, ICT_MT5_PASSWORD, ICT_MT5_SERVER
 mt5:
   login: 12345678
   password: "your_password"
   server: "FusionMarkets-Live"
   symbol: "US100"
 
+## Telegram Notifications
+## Sensitive values can be overridden via environment variables:
+##   ICT_TELEGRAM_BOT_TOKEN, ICT_TELEGRAM_CHAT_ID
 telegram:
   bot_token: "your_bot_token_here"
   chat_id: "your_chat_id_here"

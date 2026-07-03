@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-004",
+  "type": "fix",
+  "description": "Address 7 issues from semantic review: wire premium/discount filter, integrate OTE/OB as confluence filters, fix daily P&L tracking in live mode, gate connector failure in live loop, cap candle buffer, document same-candle SL/TP bias, add env var override for credentials",
+  "status": "in_progress",
+  "steps": [
+    "Wire premium/discount filter into entry_model.py generate_entry_signal() to reject long signals in premium and short signals in discount",
+    "Integrate OTE and order_blocks as optional confluence filters in entry_model.py (check if entry price is in OTE zone or near an unmitigated OB)",
+    "Fix daily P&L tracking in main.py run_live() by polling closed positions and updating daily_pnl",
+    "Gate connector failure in main.py run_live() with reconnection logic and early exit when not connected",
+    "Add max-size cap (MAX_BUFFER_SIZE) to candle_buffer in entry_model.py with sliding window behavior",
+    "Document same-candle SL/TP priority assumption in backtester.py _check_trade_exit() with a clear comment",
+    "Add environment variable override support in main.py load_config() for MT5 and Telegram credentials"
+  ],
+  "acceptance_criteria": [
+    "All 106 existing tests still pass",
+    "Premium/discount filter is checked before generating entry signals",
+    "OTE and order_blocks modules are imported and used as confluence checks in entry model",
+    "Live mode updates daily_pnl from closed positions",
+    "Live loop exits early or reconnects when connector is not connected",
+    "candle_buffer has a maximum size cap and uses sliding window",
+    "Backtester _check_trade_exit has a comment documenting the SL-first assumption",
+    "load_config supports environment variable overrides for sensitive credentials"
+  ],
+  "verification": [
+    "python3 -m pytest tests/ -v --tb=short",
+    "python3 -c 'from ict_bot.entry_model import EntryModel; from ict_bot.risk_management import calculate_position_size; from ict_bot.mt5_connector import MT5Connector; print(\"OK\")'",
+    "python3 -m py_compile main.py"
+  ],
+  "blocked_reason": null,
+  "findings": null
+}

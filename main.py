@@ -33,7 +33,14 @@ from ict_bot import market_structure, fvg, liquidity
 
 def load_config(config_path):
     """
-    Load configuration from a YAML file.
+    Load configuration from a YAML file with environment variable overrides.
+
+    Sensitive credentials can be overridden via environment variables:
+      - ICT_MT5_LOGIN: overrides mt5.login
+      - ICT_MT5_PASSWORD: overrides mt5.password
+      - ICT_MT5_SERVER: overrides mt5.server
+      - ICT_TELEGRAM_BOT_TOKEN: overrides telegram.bot_token
+      - ICT_TELEGRAM_CHAT_ID: overrides telegram.chat_id
 
     Parameters
     ----------
@@ -45,15 +52,39 @@ def load_config(config_path):
     dict
         Configuration dictionary.
     """
+    import os
+
     try:
         with open(config_path, "r") as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
     except FileNotFoundError:
         print(f"Error: Config file not found: {config_path}")
         sys.exit(1)
     except yaml.YAMLError as e:
         print(f"Error: Invalid YAML in config file: {e}")
         sys.exit(1)
+
+    if config is None:
+        config = {}
+
+    # Apply environment variable overrides for sensitive credentials
+    if "mt5" not in config:
+        config["mt5"] = {}
+    if os.environ.get("ICT_MT5_LOGIN"):
+        config["mt5"]["login"] = os.environ["ICT_MT5_LOGIN"]
+    if os.environ.get("ICT_MT5_PASSWORD"):
+        config["mt5"]["password"] = os.environ["ICT_MT5_PASSWORD"]
+    if os.environ.get("ICT_MT5_SERVER"):
+        config["mt5"]["server"] = os.environ["ICT_MT5_SERVER"]
+
+    if "telegram" not in config:
+        config["telegram"] = {}
+    if os.environ.get("ICT_TELEGRAM_BOT_TOKEN"):
+        config["telegram"]["bot_token"] = os.environ["ICT_TELEGRAM_BOT_TOKEN"]
+    if os.environ.get("ICT_TELEGRAM_CHAT_ID"):
+        config["telegram"]["chat_id"] = os.environ["ICT_TELEGRAM_CHAT_ID"]
+
+    return config
 
 
 def run_backtest(config):
@@ -141,9 +172,11 @@ def run_live(config):
         password=mt5_config.get("password"),
         server=mt5_config.get("server"),
     )
+
     if not result["success"]:
-        print(f"MT5 Connection: {result['message']}")
-        print("Continuing in monitoring mode (no live trading)...")
+        print(f"MT5 Connection failed: {result['message']}")
+        print("Cannot run live trading without MT5 connection. Exiting.")
+        return
 
     # Telegram Notifier
     notifier = TelegramNotifier(
@@ -162,11 +195,17 @@ def run_live(config):
     risk_percent = risk_config.get("risk_per_trade", 0.01)
     max_daily_loss_pct = risk_config.get("max_daily_loss", 0.03)
 
+    # Reconnection settings
+    max_reconnect_attempts = 5
+    reconnect_delay = 30  # seconds
+
     logger.log_analysis("SYSTEM", "startup", f"ICT Bot started for {symbol}")
     notifier.send_alert(f"ICT Bot started for {symbol}")
 
     daily_pnl = 0.0
     current_day = datetime.now().date()
+    # Track known closed position tickets to compute daily P&L
+    known_tickets = set()
 
     print(f"ICT Trading Bot running for {symbol}")
     print("Press Ctrl+C to stop")
@@ -182,7 +221,62 @@ def run_live(config):
                 notifier.send_daily_summary(summary)
                 logger.reset_daily()
                 daily_pnl = 0.0
+                known_tickets.clear()
                 current_day = now.date()
+
+            # Gate on connection - attempt reconnection if disconnected
+            if not connector.connected:
+                reconnected = False
+                for attempt in range(1, max_reconnect_attempts + 1):
+                    logger.log_analysis(
+                        "SYSTEM", "reconnect",
+                        f"Attempting reconnection ({attempt}/{max_reconnect_attempts})"
+                    )
+                    result = connector.connect(
+                        login=mt5_config.get("login"),
+                        password=mt5_config.get("password"),
+                        server=mt5_config.get("server"),
+                    )
+                    if result["success"]:
+                        reconnected = True
+                        logger.log_analysis("SYSTEM", "reconnect", "Reconnected")
+                        break
+                    time.sleep(reconnect_delay)
+
+                if not reconnected:
+                    logger.log_analysis(
+                        "SYSTEM", "reconnect_failed",
+                        "All reconnection attempts failed. Exiting."
+                    )
+                    notifier.send_alert(
+                        "ICT Bot: MT5 connection lost. Reconnection failed. Exiting."
+                    )
+                    break
+
+            # --- Update daily P&L from closed/open positions ---
+            positions = connector.get_open_positions()
+            if positions is not None:
+                # Track profit from positions that have been closed since last check.
+                # MT5 get_open_positions returns current open positions; we track
+                # realized P&L by monitoring account equity changes.
+                pass
+
+            # Update daily P&L from account info (equity - balance gives unrealized;
+            # we use profit field which shows realized + unrealized for open positions)
+            account_info = connector.get_account_info()
+            if account_info is not None:
+                balance = account_info["balance"]
+                # The difference between current balance and start-of-day balance
+                # approximates realized P&L. For more precise tracking we record
+                # the starting balance and compute the delta.
+                if not hasattr(run_live, '_day_start_balance'):
+                    run_live._day_start_balance = balance
+                if now.date() != getattr(run_live, '_day_start_date', None):
+                    run_live._day_start_balance = balance
+                    run_live._day_start_date = now.date()
+                daily_pnl = balance - run_live._day_start_balance
+            else:
+                balance = 10000
 
             # Check if we are in a kill zone
             active_kz = get_active_kill_zone(now)
@@ -192,8 +286,6 @@ def run_live(config):
                 continue
 
             # Check daily loss limit
-            account_info = connector.get_account_info()
-            balance = account_info["balance"] if account_info else 10000
             if not can_take_trade(daily_pnl, balance, max_daily_loss_pct):
                 logger.log_analysis("M1", "risk_check",
                                     "Daily loss limit reached, pausing")

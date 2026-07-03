@@ -19,6 +19,15 @@ from enum import Enum
 from ict_bot.liquidity import detect_equal_levels, detect_liquidity_sweep
 from ict_bot.market_structure import detect_swing_points, detect_mss
 from ict_bot.fvg import detect_fvg, get_fvg_midpoint
+from ict_bot.premium_discount import calculate_equilibrium, is_premium, is_discount
+from ict_bot.ote import calculate_ote_zone, is_price_in_ote
+from ict_bot.order_blocks import find_order_blocks
+
+
+# Maximum number of candles to retain in the buffer. This prevents unbounded
+# growth during long kill zone sessions (e.g., the 4-hour Asian session).
+# Once the buffer exceeds this size, the oldest candles are discarded.
+MAX_BUFFER_SIZE = 500
 
 
 class EntryState(Enum):
@@ -46,10 +55,19 @@ class EntryModel:
         Minimum sweep distance. Default 2.
     """
 
-    def __init__(self, lookback=5, tolerance_pips=5, min_sweep_pips=2):
+    def __init__(self, lookback=5, tolerance_pips=5, min_sweep_pips=2,
+                 htf_swing_high=None, htf_swing_low=None,
+                 max_buffer_size=MAX_BUFFER_SIZE):
         self.lookback = lookback
         self.tolerance_pips = tolerance_pips
         self.min_sweep_pips = min_sweep_pips
+        self.max_buffer_size = max_buffer_size
+
+        # HTF swing range for premium/discount filter.
+        # When set, long signals are rejected if price is in premium,
+        # and short signals are rejected if price is in discount.
+        self.htf_swing_high = htf_swing_high
+        self.htf_swing_low = htf_swing_low
 
         self.state = EntryState.WAITING_FOR_SWEEP
         self.candle_buffer = []
@@ -87,6 +105,10 @@ class EntryModel:
             Entry signal if READY_TO_ENTER state is reached, else None.
         """
         self.candle_buffer.append(candle_data)
+
+        # Cap the buffer to prevent unbounded growth during long sessions.
+        if len(self.candle_buffer) > self.max_buffer_size:
+            self.candle_buffer = self.candle_buffer[-self.max_buffer_size:]
 
         if self.state == EntryState.WAITING_FOR_SWEEP:
             self.check_liquidity_sweep()
@@ -199,9 +221,28 @@ class EntryModel:
 
             self.state = EntryState.READY_TO_ENTER
 
+    def set_htf_range(self, swing_high, swing_low):
+        """
+        Set the Higher Time Frame swing range for premium/discount filtering.
+
+        Parameters
+        ----------
+        swing_high : float
+            HTF swing high price.
+        swing_low : float
+            HTF swing low price.
+        """
+        self.htf_swing_high = swing_high
+        self.htf_swing_low = swing_low
+
     def generate_entry_signal(self):
         """
         Generate entry parameters when all confirmations are met.
+
+        Applies confluence filters before emitting a signal:
+        - Premium/Discount: rejects longs in premium, shorts in discount
+        - OTE: checks if entry price falls within the 62-79% fib zone (optional)
+        - Order Blocks: checks if entry price aligns with an unmitigated OB (optional)
 
         Returns
         -------
@@ -215,6 +256,7 @@ class EntryModel:
             - sweep_info: the liquidity sweep details
             - mss_info: the MSS details
             - fvg_info: the FVG details
+            - confluence: dict with OTE and OB confluence flags
         """
         if not all([self.sweep_info, self.mss_info, self.fvg_info]):
             return None
@@ -247,6 +289,44 @@ class EntryModel:
             # Take profit at opposing liquidity (swing high / sweep high)
             take_profit = self._find_opposing_liquidity(df, direction)
 
+        # --- Premium/Discount Filter ---
+        # Only long in discount, only short in premium.
+        if self.htf_swing_high is not None and self.htf_swing_low is not None:
+            equilibrium = calculate_equilibrium(
+                self.htf_swing_high, self.htf_swing_low
+            )
+            if direction == "long" and is_premium(entry_price, equilibrium):
+                # Reject long entry in premium zone
+                return None
+            if direction == "short" and is_discount(entry_price, equilibrium):
+                # Reject short entry in discount zone
+                return None
+
+        # --- OTE Confluence (optional, non-blocking) ---
+        ote_confluence = False
+        swings = detect_swing_points(df, lookback=self.lookback)
+        if swings:
+            swing_highs = [s for s in swings if s["type"] == "swing_high"]
+            swing_lows = [s for s in swings if s["type"] == "swing_low"]
+            if swing_highs and swing_lows:
+                recent_high = swing_highs[-1]["price"]
+                recent_low = swing_lows[-1]["price"]
+                ote_direction = ("bullish" if direction == "long" else "bearish")
+                ote_zone = calculate_ote_zone(recent_high, recent_low, ote_direction)
+                ote_confluence = is_price_in_ote(entry_price, ote_zone)
+
+        # --- Order Block Confluence (optional, non-blocking) ---
+        ob_confluence = False
+        if self.mss_info:
+            obs = find_order_blocks(df, [self.mss_info])
+            expected_ob = ("bullish_ob" if direction == "long" else "bearish_ob")
+            for ob in obs:
+                if ob["type"] == expected_ob:
+                    # Check if entry price is within the OB zone
+                    if ob["low"] <= entry_price <= ob["high"]:
+                        ob_confluence = True
+                        break
+
         # Calculate risk/reward
         risk = abs(entry_price - stop_loss)
         reward = abs(take_profit - entry_price)
@@ -261,6 +341,10 @@ class EntryModel:
             "sweep_info": self.sweep_info,
             "mss_info": self.mss_info,
             "fvg_info": self.fvg_info,
+            "confluence": {
+                "ote": ote_confluence,
+                "order_block": ob_confluence,
+            },
         }
 
         return self.entry_signal
