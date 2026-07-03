@@ -58,5 +58,5 @@
     "Verify file uses proper MQL5 syntax (property declarations, #property directives, proper types)"
   ],
   "blocked_reason": null,
-  "findings": "MQL5 EA created at ICT_Bot.mq5 (1651 lines). All logic patterns verified against Python source. Braces balanced. Cannot compile without MetaEditor but code-level validation confirms correct MQL5 syntax, identical algorithms, and matching parameters. The Asian kill zone crosses_midnight edge case was verified: Python time(0,0) comparison means the session effectively covers 20:00-23:59 ET, which the MQL5 code replicates correctly with et_total >= 1200."
+  "findings": "MQL5 EA created at ICT_Bot.mq5 (1709 lines). Review fixes applied: (1) Added ServerUTCOffset input (default 0) for broker time correction while preserving identical default behavior to Python. (2) Added bounds checking after buffer trimming to reset state when indices go negative, matching Python rescan-from-scratch behavior. (3) Added CancelPendingOrders() on state machine reset to prevent stale limit orders, aligning with Python immediate-activation model. (4) Removed dead-code et_total < 0 check in Asian kill zone with documentation. All braces balanced. No compilation available but syntax validated."
 }

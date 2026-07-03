@@ -39,6 +39,7 @@ input double   VolumeStep       = 0.01;     // Volume step
 input int      HTFLookback      = 20;       // HTF daily candles for bias
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
+input int      ServerUTCOffset  = 0;        // Broker server time offset from UTC in hours (0 = server is UTC)
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                       |
@@ -283,13 +284,15 @@ int GetETOffsetHours(datetime dt)
 //+------------------------------------------------------------------+
 void ServerTimeToET(datetime server_time, int &et_hour, int &et_minute)
 {
-   // MT5 server time is typically UTC (or broker-specific).
-   // We assume server time = UTC for consistency with Python code
-   // which assumes naive timestamps are UTC.
-   int offset = GetETOffsetHours(server_time);
+   // Convert server time to UTC first by subtracting the broker offset,
+   // then apply the ET offset. Python assumes timestamps are UTC;
+   // by default ServerUTCOffset=0 which preserves identical behavior.
+   // For brokers on UTC+2 or UTC+3, set ServerUTCOffset accordingly.
+   datetime utc_time = server_time - ServerUTCOffset * 3600;
+   int offset = GetETOffsetHours(utc_time);
    
    MqlDateTime mdt;
-   TimeToStruct(server_time, mdt);
+   TimeToStruct(utc_time, mdt);
    
    int total_minutes = mdt.hour * 60 + mdt.min + offset * 60;
    
@@ -313,8 +316,11 @@ string GetActiveKillZone(datetime server_time)
    int et_total = et_hour * 60 + et_minute;
    
    // Asian: 20:00 - 00:00 ET (crosses midnight)
-   // Condition: et_total >= 20*60 OR et_total < 0*60
-   if(et_total >= 1200 || et_total < 0)
+   // Note: After wrapping in ServerTimeToET, et_total is always in [0, 1439].
+   // The Python time comparison uses time(0,0) as end which excludes midnight
+   // exactly. The condition et_total >= 1200 covers 20:00-23:59 ET, which is
+   // functionally identical to the Python behavior (00:00:00 is never matched).
+   if(et_total >= 1200)
       return "asian";
    
    // London: 02:00 - 05:00 ET
@@ -333,6 +339,35 @@ string GetActiveKillZone(datetime server_time)
 }
 
 //+------------------------------------------------------------------+
+//| Cancel all unfilled pending orders for this EA                     |
+//| Corresponds to: Python backtester has no pending order concept;   |
+//| it sets active_trade immediately. This ensures the live EA does   |
+//| not accumulate stale limit orders from prior kill zones, keeping  |
+//| behavior consistent with the Python model.                        |
+//+------------------------------------------------------------------+
+void CancelPendingOrders()
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && OrderSelect(ticket))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol
+            && OrderGetInteger(ORDER_MAGIC) == 20240101)
+         {
+            MqlTradeRequest request;
+            MqlTradeResult  result;
+            ZeroMemory(request);
+            ZeroMemory(result);
+            request.action = TRADE_ACTION_REMOVE;
+            request.order  = ticket;
+            OrderSend(request, result);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Reset the entry model state                                        |
 //| Corresponds to: entry_model.py EntryModel.reset()                 |
 //+------------------------------------------------------------------+
@@ -344,6 +379,9 @@ void ResetEntryModel()
    g_sweep_valid = false;
    g_mss_valid   = false;
    g_fvg_valid   = false;
+   
+   // Cancel any stale pending orders from prior state machine cycle
+   CancelPendingOrders();
 }
 
 //+------------------------------------------------------------------+
@@ -380,6 +418,26 @@ void AddCandleToBuffer(const CandleData &candle)
       }
       if(g_fvg_valid)
          g_fvg_info.index -= excess;
+      
+      // Guard: reset state if any stored index went negative
+      // (the referenced candle was trimmed from the buffer)
+      // This matches Python behavior where buffer slicing discards
+      // indices entirely and detection re-scans from scratch.
+      if(g_sweep_valid && g_sweep_info.sweep_index < 0)
+      {
+         g_sweep_valid = false;
+         g_state = STATE_WAITING_FOR_SWEEP;
+      }
+      if(g_mss_valid && (g_mss_info.break_index < 0 || g_mss_info.swing_index < 0))
+      {
+         g_mss_valid = false;
+         g_state = STATE_WAITING_FOR_SWEEP;
+      }
+      if(g_fvg_valid && g_fvg_info.index < 0)
+      {
+         g_fvg_valid = false;
+         g_state = STATE_WAITING_FOR_SWEEP;
+      }
    }
 }
 
