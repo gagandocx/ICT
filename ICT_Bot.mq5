@@ -39,7 +39,8 @@ input double   VolumeStep       = 0.01;     // Volume step
 input int      HTFLookback      = 20;       // HTF daily candles for bias
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
-input int      ServerUTCOffset  = 0;        // Broker server time offset from UTC in hours (0 = server is UTC)
+input int      ServerUTCOffset  = -1;       // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset)
+input bool     DebugMode        = true;      // Enable verbose debug logging
 
 //+------------------------------------------------------------------+
 //| Enumerations                                                       |
@@ -279,22 +280,58 @@ int GetETOffsetHours(datetime dt)
 }
 
 //+------------------------------------------------------------------+
+//| Get the broker server UTC offset in seconds                        |
+//| Uses TimeGMTOffset() for auto-detection, falls back to manual      |
+//| ServerUTCOffset input when auto-detect is disabled (-1 is auto).   |
+//|                                                                    |
+//| TimeGMTOffset() returns the difference in seconds between the      |
+//| broker's server time and GMT. So:                                  |
+//|   UTC_time = server_time - TimeGMTOffset()                         |
+//|                                                                    |
+//| For Fusion Markets (UTC+2 winter / UTC+3 summer DST):              |
+//|   TimeGMTOffset() would return 7200 (winter) or 10800 (summer)    |
+//+------------------------------------------------------------------+
+int GetBrokerUTCOffsetSeconds()
+{
+   if(ServerUTCOffset == -1)
+   {
+      // Auto-detect: TimeGMTOffset() returns broker's offset from GMT in seconds
+      return (int)TimeGMTOffset();
+   }
+   else
+   {
+      // Manual override: convert hours to seconds
+      return ServerUTCOffset * 3600;
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Convert server time to ET hour and minute                          |
 //| Corresponds to: kill_zones.py _to_et()                            |
+//|                                                                    |
+//| Flow: server_time -> UTC -> ET                                     |
+//| Step 1: UTC = server_time - broker_utc_offset                      |
+//| Step 2: ET = UTC + ET_offset (where ET_offset is -5 or -4)        |
+//|                                                                    |
+//| The Python backtester's tick data is in UTC (time_msc is epoch =  |
+//| UTC). Python kill_zones.py converts UTC -> ET using zoneinfo.     |
+//| For MQL5 to match, we must correctly convert:                      |
+//|   broker server time -> UTC -> ET                                  |
 //+------------------------------------------------------------------+
 void ServerTimeToET(datetime server_time, int &et_hour, int &et_minute)
 {
-   // Convert server time to UTC first by subtracting the broker offset,
-   // then apply the ET offset. Python assumes timestamps are UTC;
-   // by default ServerUTCOffset=0 which preserves identical behavior.
-   // For brokers on UTC+2 or UTC+3, set ServerUTCOffset accordingly.
-   datetime utc_time = server_time - ServerUTCOffset * 3600;
-   int offset = GetETOffsetHours(utc_time);
+   // Step 1: Convert server time to UTC
+   int broker_offset_sec = GetBrokerUTCOffsetSeconds();
+   datetime utc_time = server_time - broker_offset_sec;
    
+   // Step 2: Get ET offset for this UTC time (handles US DST)
+   int et_offset = GetETOffsetHours(utc_time);
+   
+   // Step 3: Apply ET offset to UTC
    MqlDateTime mdt;
    TimeToStruct(utc_time, mdt);
    
-   int total_minutes = mdt.hour * 60 + mdt.min + offset * 60;
+   int total_minutes = mdt.hour * 60 + mdt.min + et_offset * 60;
    
    // Handle day wrapping
    if(total_minutes < 0) total_minutes += 1440;
@@ -315,27 +352,46 @@ string GetActiveKillZone(datetime server_time)
    ServerTimeToET(server_time, et_hour, et_minute);
    int et_total = et_hour * 60 + et_minute;
    
+   string result = "";
+   
    // Asian: 20:00 - 00:00 ET (crosses midnight)
    // Note: After wrapping in ServerTimeToET, et_total is always in [0, 1439].
    // The Python time comparison uses time(0,0) as end which excludes midnight
    // exactly. The condition et_total >= 1200 covers 20:00-23:59 ET, which is
    // functionally identical to the Python behavior (00:00:00 is never matched).
    if(et_total >= 1200)
-      return "asian";
+      result = "asian";
    
    // London: 02:00 - 05:00 ET
-   if(et_total >= 120 && et_total < 300)
-      return "london";
+   else if(et_total >= 120 && et_total < 300)
+      result = "london";
    
    // NY AM: 10:00 - 11:00 ET
-   if(et_total >= 600 && et_total < 660)
-      return "ny_am";
+   else if(et_total >= 600 && et_total < 660)
+      result = "ny_am";
    
    // NY PM: 13:30 - 16:00 ET
-   if(et_total >= 810 && et_total < 960)
-      return "ny_pm";
+   else if(et_total >= 810 && et_total < 960)
+      result = "ny_pm";
    
-   return "";
+   // Debug: log the ET time and kill zone determination periodically
+   // Only log on the first candle of each minute to reduce spam
+   static datetime last_debug_time = 0;
+   if(DebugMode && server_time != last_debug_time)
+   {
+      last_debug_time = server_time;
+      int broker_offset_sec = GetBrokerUTCOffsetSeconds();
+      if(result != "")
+      {
+         Print("ICT Debug: ServerTime=", TimeToString(server_time, TIME_DATE|TIME_MINUTES),
+               " -> ET ", StringFormat("%02d:%02d", et_hour, et_minute),
+               " | KillZone=", result,
+               " | BrokerOffset=", broker_offset_sec/3600, "h",
+               " | AutoDetect=", (ServerUTCOffset == -1 ? "Yes" : "No"));
+      }
+   }
+   
+   return result;
 }
 
 //+------------------------------------------------------------------+
@@ -373,6 +429,13 @@ void CancelPendingOrders()
 //+------------------------------------------------------------------+
 void ResetEntryModel()
 {
+   if(DebugMode && g_state != STATE_WAITING_FOR_SWEEP && g_buffer_count > 0)
+   {
+      Print("ICT Debug: [RESET] Entry model reset",
+            " | PrevState=", EnumToString(g_state),
+            " | BufferWas=", g_buffer_count);
+   }
+   
    g_state = STATE_WAITING_FOR_SWEEP;
    g_buffer_count = 0;
    ArrayResize(g_buffer, 0);
@@ -981,6 +1044,19 @@ void CheckLiquiditySweep()
       g_sweep_info  = sweeps[sweep_count - 1];
       g_sweep_valid = true;
       g_state       = STATE_WAITING_FOR_MSS;
+      
+      if(DebugMode)
+      {
+         string sweep_type_str = (g_sweep_info.type == SWEEP_HIGH) ? "SWEEP_HIGH" : "SWEEP_LOW";
+         Print("ICT Debug: [STATE] SWEEP DETECTED -> WAITING_FOR_MSS",
+               " | Type=", sweep_type_str,
+               " | Level=", DoubleToString(g_sweep_info.level, _Digits),
+               " | SweepPrice=", DoubleToString(g_sweep_info.sweep_price, _Digits),
+               " | SweepIdx=", g_sweep_info.sweep_index,
+               " | BufferSize=", g_buffer_count,
+               " | EqualLevels=", level_count,
+               " | TotalSweeps=", sweep_count);
+      }
    }
 }
 
@@ -1022,6 +1098,16 @@ void CheckMSS()
             g_mss_info  = mss_events[i];
             g_mss_valid = true;
             g_state     = STATE_WAITING_FOR_FVG;
+            
+            if(DebugMode)
+            {
+               Print("ICT Debug: [STATE] MSS DETECTED -> WAITING_FOR_FVG",
+                     " | Type=BEARISH_MSS",
+                     " | BrokenLevel=", DoubleToString(g_mss_info.broken_level, _Digits),
+                     " | BreakIdx=", g_mss_info.break_index,
+                     " | SwingIdx=", g_mss_info.swing_index,
+                     " | After SweepIdx=", sweep_idx);
+            }
             break;
          }
          else if(g_sweep_info.type == SWEEP_LOW && mss_events[i].type == MSS_BULLISH)
@@ -1029,6 +1115,16 @@ void CheckMSS()
             g_mss_info  = mss_events[i];
             g_mss_valid = true;
             g_state     = STATE_WAITING_FOR_FVG;
+            
+            if(DebugMode)
+            {
+               Print("ICT Debug: [STATE] MSS DETECTED -> WAITING_FOR_FVG",
+                     " | Type=BULLISH_MSS",
+                     " | BrokenLevel=", DoubleToString(g_mss_info.broken_level, _Digits),
+                     " | BreakIdx=", g_mss_info.break_index,
+                     " | SwingIdx=", g_mss_info.swing_index,
+                     " | After SweepIdx=", sweep_idx);
+            }
             break;
          }
       }
@@ -1090,6 +1186,19 @@ void CheckFVG()
       g_fvg_info  = valid_fvgs[best_idx];
       g_fvg_valid = true;
       g_state     = STATE_READY_TO_ENTER;
+      
+      if(DebugMode)
+      {
+         string fvg_type_str = (expected_type == FVG_BEARISH) ? "BEARISH_FVG" : "BULLISH_FVG";
+         Print("ICT Debug: [STATE] FVG DETECTED -> READY_TO_ENTER",
+               " | Type=", fvg_type_str,
+               " | High=", DoubleToString(g_fvg_info.high, _Digits),
+               " | Low=", DoubleToString(g_fvg_info.low, _Digits),
+               " | Midpoint=", DoubleToString(g_fvg_info.midpoint, _Digits),
+               " | FVG_Idx=", g_fvg_info.index,
+               " | ValidFVGs=", valid_count,
+               " | TotalFVGs=", fvg_count);
+      }
    }
 }
 
@@ -1208,9 +1317,25 @@ bool GenerateEntrySignal(EntrySignal &signal, string kz_name)
    {
       double equilibrium = CalculateEquilibrium(g_htf_swing_high, g_htf_swing_low);
       if(direction == "long" && IsPremium(entry_price, equilibrium))
+      {
+         if(DebugMode)
+            Print("ICT Debug: [REJECTED] Long signal rejected - entry in PREMIUM zone",
+                  " | Entry=", DoubleToString(entry_price, _Digits),
+                  " | Equilibrium=", DoubleToString(equilibrium, _Digits),
+                  " | HTF_High=", DoubleToString(g_htf_swing_high, _Digits),
+                  " | HTF_Low=", DoubleToString(g_htf_swing_low, _Digits));
          return false; // Reject long in premium
+      }
       if(direction == "short" && IsDiscount(entry_price, equilibrium))
+      {
+         if(DebugMode)
+            Print("ICT Debug: [REJECTED] Short signal rejected - entry in DISCOUNT zone",
+                  " | Entry=", DoubleToString(entry_price, _Digits),
+                  " | Equilibrium=", DoubleToString(equilibrium, _Digits),
+                  " | HTF_High=", DoubleToString(g_htf_swing_high, _Digits),
+                  " | HTF_Low=", DoubleToString(g_htf_swing_low, _Digits));
          return false; // Reject short in discount
+      }
    }
    
    // --- OTE Confluence (non-blocking) ---
@@ -1549,8 +1674,25 @@ void ProcessNewCandle(const CandleData &candle, string kz_name)
       {
          if(signal.valid)
          {
+            if(DebugMode)
+               Print("ICT Debug: [SIGNAL] Entry signal generated",
+                     " | Dir=", signal.direction,
+                     " | Entry=", DoubleToString(signal.entry_price, _Digits),
+                     " | SL=", DoubleToString(signal.stop_loss, _Digits),
+                     " | TP=", DoubleToString(signal.take_profit, _Digits),
+                     " | R:R=", DoubleToString(signal.risk_reward, 2),
+                     " | KZ=", kz_name,
+                     " | OTE=", (signal.ote_confluence ? "Yes" : "No"),
+                     " | OB=", (signal.ob_confluence ? "Yes" : "No"));
+            
             PlaceLimitOrder(signal);
          }
+      }
+      else
+      {
+         if(DebugMode)
+            Print("ICT Debug: [REJECTED] Signal generation returned false (P/D filter or invalid state)",
+                  " | KZ=", kz_name);
       }
       
       // Reset after entry attempt (regardless of success)
@@ -1587,10 +1729,34 @@ int OnInit()
    // Initial HTF range update
    UpdateHTFRange();
    
+   // Log initialization details including timezone info
+   int broker_offset_sec = GetBrokerUTCOffsetSeconds();
+   Print("ICT Bot: ========================================");
    Print("ICT Bot: Initialized on ", _Symbol);
    Print("ICT Bot: Risk=", RiskPercent * 100, "%, MaxDailyLoss=", MaxDailyLoss * 100, "%");
    Print("ICT Bot: SwingLookback=", SwingLookback, ", EqualLevelTol=", EqualLevelTolerance,
          ", MinSweep=", MinSweepPips, ", MaxBuffer=", MaxBufferSize);
+   Print("ICT Bot: Timezone Config:");
+   Print("ICT Bot:   ServerUTCOffset input=", ServerUTCOffset,
+         " (", (ServerUTCOffset == -1 ? "AUTO-DETECT" : "MANUAL"), ")");
+   Print("ICT Bot:   Detected broker offset=", broker_offset_sec/3600, " hours (",
+         broker_offset_sec, " seconds)");
+   Print("ICT Bot:   TimeGMTOffset()=", (int)TimeGMTOffset(), " seconds");
+   Print("ICT Bot:   Current server time=", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+   
+   // Show what ET time is right now for verification
+   int et_h, et_m;
+   ServerTimeToET(TimeCurrent(), et_h, et_m);
+   Print("ICT Bot:   Current ET time=", StringFormat("%02d:%02d", et_h, et_m));
+   
+   string current_kz = GetActiveKillZone(TimeCurrent());
+   Print("ICT Bot:   Current kill zone=", (current_kz == "" ? "NONE" : current_kz));
+   Print("ICT Bot:   DebugMode=", (DebugMode ? "ON" : "OFF"));
+   Print("ICT Bot:   HTF Range Valid=", (g_htf_range_valid ? "Yes" : "No"));
+   if(g_htf_range_valid)
+      Print("ICT Bot:   HTF High=", DoubleToString(g_htf_swing_high, _Digits),
+            ", HTF Low=", DoubleToString(g_htf_swing_low, _Digits));
+   Print("ICT Bot: ========================================");
    
    return INIT_SUCCEEDED;
 }
@@ -1640,6 +1806,10 @@ void CheckForNewBar()
    if(g_last_bar_time == 0)
    {
       g_last_bar_time = current_bar_time;
+      if(DebugMode)
+         Print("ICT Debug: First bar detected, initializing. ServerTime=",
+               TimeToString(current_bar_time, TIME_DATE|TIME_MINUTES),
+               " | BrokerOffset=", GetBrokerUTCOffsetSeconds()/3600, "h");
       return;
    }
    
@@ -1677,7 +1847,19 @@ void CheckForNewBar()
       // Not in any kill zone - reset
       // Corresponds to: backtester.py "else: entry_model.reset()"
       if(g_buffer_count > 0)
+      {
+         if(DebugMode)
+         {
+            int et_hour, et_minute;
+            ServerTimeToET(candle.time, et_hour, et_minute);
+            Print("ICT Debug: [RESET] Outside kill zone, resetting buffer",
+                  " | ServerTime=", TimeToString(candle.time, TIME_DATE|TIME_MINUTES),
+                  " | ET=", StringFormat("%02d:%02d", et_hour, et_minute),
+                  " | BufferSize=", g_buffer_count,
+                  " | State=", EnumToString(g_state));
+         }
          ResetEntryModel();
+      }
       return;
    }
    
@@ -1685,6 +1867,10 @@ void CheckForNewBar()
    // Corresponds to: backtester.py daily loss check
    if(IsDailyLossLimitReached())
    {
+      if(DebugMode)
+         Print("ICT Debug: [BLOCKED] Daily loss limit reached, skipping",
+               " | DailyPnL=", DoubleToString(g_daily_pnl, 2),
+               " | DayStartBalance=", DoubleToString(g_day_start_balance, 2));
       ResetEntryModel();
       return;
    }
