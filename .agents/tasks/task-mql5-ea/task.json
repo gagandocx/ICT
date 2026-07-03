@@ -1,0 +1,7 @@
+{
+  "task_id": "task-mql5-ea",
+  "task_description": "Create an MQL5 Expert Advisor (ICT_Bot.mq5) that replicates the Python ICT trading bot logic identically for use in MT5 Strategy Tester. The EA must produce the same inputs and outputs as the Python version.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}

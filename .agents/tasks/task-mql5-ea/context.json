@@ -1,0 +1,29 @@
+{
+  "project_type": "Python ICT Trading Bot with MT5 integration, converting to MQL5 Expert Advisor",
+  "language": "Python (source) -> MQL5 (target)",
+  "build_system": "No build system for Python. MQL5 file will be compiled in MT5 Strategy Tester (not available here).",
+  "test_framework": "pytest for Python tests in tests/ directory. MQL5 validation is syntax/logic only.",
+  "build_command": "N/A - MQL5 compilation requires MetaEditor which is not available in this environment",
+  "test_command": "N/A - Strategy Tester runs inside MT5 platform",
+  "verification_instructions": "Verify the .mq5 file is syntactically correct MQL5, contains identical logic to the Python modules, and all input parameters match.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup needed - this is a code generation task producing a single .mq5 file",
+  "environment_constraints": "Cannot compile MQL5 in this environment. Cannot run MT5 Strategy Tester. Validation is code-level only.",
+  "contribution_requirements": "Place ICT_Bot.mq5 at the root of the repository. Commit to main branch. Do NOT push.",
+  "key_patterns": "The Python bot uses a sequential state machine: Liquidity Sweep -> MSS -> FVG -> Entry. All logic modules are pure functions operating on OHLC DataFrames. The entry model buffers candles (max 500) and only trades during Kill Zones. Risk is 1% per trade, 3% max daily loss.",
+  "relevant_files": [
+    "ict_bot/entry_model.py - Main state machine (WAITING_FOR_SWEEP -> WAITING_FOR_MSS -> WAITING_FOR_FVG -> READY_TO_ENTER)",
+    "ict_bot/liquidity.py - Equal highs/lows detection and liquidity sweep detection",
+    "ict_bot/market_structure.py - Swing point detection (lookback=5), BOS detection, MSS detection",
+    "ict_bot/fvg.py - FVG detection (3-candle pattern) and iFVG detection",
+    "ict_bot/order_blocks.py - Order block identification (last opposing candle before BOS/MSS)",
+    "ict_bot/kill_zones.py - Kill zone time windows in ET (Asian 20:00-00:00, London 02:00-05:00, NY AM 10:00-11:00, NY PM 13:30-16:00)",
+    "ict_bot/ote.py - OTE zone calculation (62-79% Fibonacci retracement)",
+    "ict_bot/premium_discount.py - Premium/discount zone classification relative to equilibrium",
+    "ict_bot/risk_management.py - Position sizing (1% risk), daily loss limit (3%), SL/TP validation",
+    "ict_bot/backtester.py - Backtesting engine with trade simulation, HTF range derivation from daily OHLC",
+    "main.py - Live trading loop and backtest runner",
+    "config/settings.yaml - Configuration with kill zone times, risk params, symbol US100"
+  ],
+  "directory_structure": "ict_bot/ contains all trading logic modules. config/ has YAML settings. tests/ has pytest tests. main.py is the entry point."
+}
