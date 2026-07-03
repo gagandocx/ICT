@@ -1,0 +1,37 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Create the complete project structure, configuration system, and core ICT analysis modules (market structure, order blocks, FVG, liquidity, kill zones, OTE, premium/discount)",
+  "status": "in_progress",
+  "steps": [
+    "Create project root files: main.py (entry point), requirements.txt (MetaTrader5, python-telegram-bot, pandas, numpy, pyyaml, pytest, schedule), .gitignore",
+    "Create config/config_example.yaml with sections for: mt5 (login, password, server, symbol=US100), telegram (bot_token, chat_id), risk (risk_per_trade=0.01, max_daily_loss=0.03), timeframes (htf=[D1,H4], mtf=[M15], ltf=[M1]), kill_zones with ET times (asian=20:00-00:00, london=02:00-05:00, ny_am=10:00-11:00, ny_pm=13:30-16:00)",
+    "Create ict_bot/__init__.py exporting all modules",
+    "Create ict_bot/market_structure.py: Implement BOS (Break of Structure) and MSS (Market Structure Shift) detection. Use swing high/low identification on OHLC data. BOS = price breaks a swing point in the same direction as trend. MSS = price breaks a swing point against the trend (reversal signal). Functions: detect_swing_points(df, lookback), detect_bos(df, swings), detect_mss(df, swings). Return annotated DataFrame with BOS/MSS events including timestamps and price levels.",
+    "Create ict_bot/order_blocks.py: Identify bullish OBs (last bearish candle before a bullish BOS) and bearish OBs (last bullish candle before a bearish BOS). Functions: find_order_blocks(df, structure_events), is_ob_mitigated(ob, current_price). Store OBs with high/low/open/close and mitigation status.",
+    "Create ict_bot/fvg.py: Detect Fair Value Gaps (3-candle pattern where candle 1 high < candle 3 low = bullish FVG, candle 1 low > candle 3 high = bearish FVG). Also detect Inverse FVG (iFVG) where price fills an FVG and the gap becomes a zone of interest in opposite direction. Functions: detect_fvg(df), detect_ifvg(df, existing_fvgs), get_fvg_midpoint(fvg). Return list of FVG objects with high, low, midpoint (50% level for entry), direction, and fill status.",
+    "Create ict_bot/liquidity.py: Detect equal highs/lows (potential liquidity pools) and swing point raids (price sweeps above/below a level then reverses). Functions: detect_equal_levels(df, tolerance_pips=5), detect_liquidity_sweep(df, levels, min_sweep_pips=2). A sweep is confirmed when price breaks a level but closes back below/above it.",
+    "Create ict_bot/kill_zones.py: Define Kill Zone time windows in ET and convert to UTC. Check if current time is within any kill zone. Functions: is_in_kill_zone(timestamp, zone_name=None), get_active_kill_zone(timestamp), get_kill_zone_range(zone_name, date). Kill zones: asian(20:00-00:00), london(02:00-05:00), ny_am/silver_bullet(10:00-11:00), ny_pm(13:30-16:00).",
+    "Create ict_bot/ote.py: Implement Optimal Trade Entry using Fibonacci retracement. After MSS, draw fib from swing high to swing low (or vice versa). OTE zone is between 62% and 79% retracement. Functions: calculate_ote_zone(swing_high, swing_low, direction), is_price_in_ote(price, ote_zone).",
+    "Create ict_bot/premium_discount.py: Determine if price is in premium (above 50% of range) or discount (below 50% of range) relative to the HTF swing range. Functions: calculate_equilibrium(swing_high, swing_low), is_premium(price, equilibrium), is_discount(price, equilibrium). Rule: only long in discount, only short in premium."
+  ],
+  "acceptance_criteria": [
+    "All module files exist and are importable without errors: python -c 'from ict_bot.market_structure import detect_swing_points, detect_bos, detect_mss'",
+    "All module files exist and are importable: python -c 'from ict_bot.order_blocks import find_order_blocks'",
+    "All module files exist and are importable: python -c 'from ict_bot.fvg import detect_fvg, detect_ifvg, get_fvg_midpoint'",
+    "All module files exist and are importable: python -c 'from ict_bot.liquidity import detect_equal_levels, detect_liquidity_sweep'",
+    "All module files exist and are importable: python -c 'from ict_bot.kill_zones import is_in_kill_zone, get_active_kill_zone'",
+    "All module files exist and are importable: python -c 'from ict_bot.ote import calculate_ote_zone, is_price_in_ote'",
+    "All module files exist and are importable: python -c 'from ict_bot.premium_discount import calculate_equilibrium, is_premium, is_discount'",
+    "requirements.txt contains all needed dependencies",
+    "config/config_example.yaml contains all configuration sections with correct structure"
+  ],
+  "verification": [
+    "pip install -r requirements.txt",
+    "python -c 'import ict_bot; print(dir(ict_bot))'",
+    "python -c 'from ict_bot.market_structure import detect_swing_points, detect_bos, detect_mss; from ict_bot.order_blocks import find_order_blocks; from ict_bot.fvg import detect_fvg, detect_ifvg; from ict_bot.liquidity import detect_equal_levels, detect_liquidity_sweep; from ict_bot.kill_zones import is_in_kill_zone; from ict_bot.ote import calculate_ote_zone; from ict_bot.premium_discount import calculate_equilibrium; print(\"All imports OK\")'",
+    "python -m py_compile main.py"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

@@ -1,0 +1,36 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Create comprehensive test suite covering all ICT concept modules, the entry model state machine, risk management calculations, and backtester logic",
+  "status": "pending",
+  "steps": [
+    "Create tests/__init__.py",
+    "Create tests/conftest.py with shared pytest fixtures: sample OHLC DataFrames (bullish trend, bearish trend, ranging market), sample config dict, mock MT5 responses",
+    "Create tests/test_market_structure.py: Test swing point detection with known data (identify clear swing highs/lows). Test BOS detection (price breaking swing in trend direction). Test MSS detection (price breaking swing against trend). Use specific OHLC sequences where the expected BOS/MSS locations are predetermined.",
+    "Create tests/test_order_blocks.py: Test bullish OB identification (last bearish candle before bullish BOS). Test bearish OB identification (last bullish candle before bearish BOS). Test OB mitigation detection.",
+    "Create tests/test_fvg.py: Test bullish FVG detection (candle1.high < candle3.low). Test bearish FVG detection (candle1.low > candle3.high). Test FVG midpoint calculation. Test iFVG detection when an FVG gets filled. Test that non-FVG patterns are not falsely detected.",
+    "Create tests/test_liquidity.py: Test equal highs/lows detection with tolerance. Test liquidity sweep detection (price pierces level then closes back). Test that clean breakouts (close beyond level) are NOT marked as sweeps.",
+    "Create tests/test_kill_zones.py: Test time-in-zone checking for each kill zone (asian, london, ny_am, ny_pm). Test timezone conversion from ET to UTC. Test boundary conditions (exactly at start/end of zone). Test that times outside all zones return False.",
+    "Create tests/test_ote.py: Test OTE zone calculation (62-79% fib retracement). Test price-in-OTE checking for prices inside and outside the zone.",
+    "Create tests/test_premium_discount.py: Test equilibrium calculation. Test premium/discount classification. Test boundary at equilibrium.",
+    "Create tests/test_entry_model.py: Test sequential state machine - cannot get FVG signal without prior MSS, cannot get MSS signal without prior sweep. Test full sequence: feed candles that create sweep -> MSS -> FVG and verify entry signal is generated. Test state reset when kill zone ends. Test that entry price is at FVG 50% midpoint. Test SL placement above/below highest FVG candle in MSS leg.",
+    "Create tests/test_risk_management.py: Test position size calculation with known values. Test daily loss limit enforcement (trade rejected when daily loss >= 3%). Test edge cases (zero balance, very tight SL).",
+    "Create tests/test_backtester.py: Test that backtester processes candles and produces results dict with expected keys (win_rate, profit_factor, max_drawdown, total_trades). Test with a simple synthetic dataset where outcomes are known."
+  ],
+  "acceptance_criteria": [
+    "pytest tests/ -v runs and all tests pass",
+    "Tests cover all core ICT modules: market_structure, order_blocks, fvg, liquidity, kill_zones, ote, premium_discount",
+    "Tests cover the entry model sequential state machine logic",
+    "Tests cover risk management calculations",
+    "Tests use realistic OHLC data fixtures, not trivial/empty data",
+    "No tests are skipped or xfailed without good reason",
+    "At least 30 test cases total across all test files"
+  ],
+  "verification": [
+    "pip install -r requirements.txt",
+    "pytest tests/ -v --tb=short 2>&1 | tail -40",
+    "pytest tests/ -v --tb=short 2>&1 | grep -E '(passed|failed|error)'"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

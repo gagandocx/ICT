@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Implement the sequential entry model, MT5 connector, risk management, Telegram notifications, trade logger, and backtesting engine",
+  "status": "pending",
+  "steps": [
+    "Create ict_bot/entry_model.py: Implement the sequential confirmation entry model that enforces strict ordering during Kill Zones. State machine with states: WAITING_FOR_SWEEP -> WAITING_FOR_MSS -> WAITING_FOR_FVG -> READY_TO_ENTER. Class EntryModel with methods: update(candle_data) that processes each new candle, check_liquidity_sweep() using liquidity module, check_mss() using market_structure module (only after sweep detected), check_fvg() using fvg module (only after MSS detected), generate_entry_signal() that returns entry parameters (entry_price at FVG 50% midpoint, stop_loss above/below the candle that created the HIGHEST FVG in the MSS leg, take_profit at opposing liquidity). Reset state after entry or kill zone ends.",
+    "Create ict_bot/risk_management.py: Calculate position size based on 1% risk per trade and stop loss distance. Track daily P&L and enforce 3% max daily loss. Functions: calculate_position_size(account_balance, risk_percent, entry_price, stop_loss_price, symbol_info), check_daily_loss_limit(daily_pnl, account_balance, max_loss_percent=0.03), can_take_trade(daily_pnl, account_balance). Also validate that stop loss and take profit levels are logical.",
+    "Create ict_bot/mt5_connector.py: Wrapper around MetaTrader5 package. Class MT5Connector with methods: connect(login, password, server), disconnect(), get_candles(symbol, timeframe, count), get_account_info(), place_order(symbol, order_type, volume, price, sl, tp, comment), close_position(ticket), get_open_positions(), get_symbol_info(symbol). Handle connection errors gracefully. Timeframe mapping from string (M1, M15, H4, D1) to MT5 constants.",
+    "Create ict_bot/telegram_notifier.py: Send trade alerts and daily summaries via Telegram Bot API. Class TelegramNotifier with methods: send_alert(message), send_trade_entry(trade_details), send_trade_exit(trade_result), send_daily_summary(daily_stats). Format messages with relevant trade info (entry, SL, TP, risk, R:R ratio). Use python-telegram-bot or direct HTTP requests to Telegram API.",
+    "Create ict_bot/logger.py: Trade journal logging system. Log all trade decisions, entries, exits, and analysis results. Class TradeLogger with methods: log_analysis(timeframe, analysis_type, result), log_trade_entry(trade_details), log_trade_exit(trade_result), log_daily_summary(). Write to both console and file (logs/ directory). Include timestamps, trade rationale, ICT concepts triggered.",
+    "Create ict_bot/backtester.py: Backtesting engine that replays historical data through the entry model. Class Backtester with methods: load_data(csv_file_or_mt5_history), run(start_date, end_date), get_results(). Simulate the full entry model on historical 1m data within kill zone windows. Track metrics: win rate, average R:R, profit factor, max drawdown, total trades, equity curve. Output results as a summary dict and optionally save to CSV.",
+    "Update main.py: Create the main trading loop. Load config from YAML. Initialize MT5 connector, Telegram notifier, logger. Multi-timeframe analysis loop: fetch HTF (D1/H4) for bias, MTF (M15) for context/zones, LTF (1m) for entry. During kill zones, run the entry model. Place trades via MT5 when signals fire. Support --backtest flag to run backtester instead of live trading. Support --config flag to specify config file path."
+  ],
+  "acceptance_criteria": [
+    "EntryModel enforces sequential state: sweep -> MSS -> FVG -> entry. Cannot skip steps.",
+    "Risk management correctly calculates position size: for $10000 account with 1% risk and 50 pip SL, position size should be appropriate",
+    "MT5Connector has all required methods with proper error handling and does not crash if MT5 is not installed (graceful import handling)",
+    "TelegramNotifier formats trade messages with entry, SL, TP, R:R ratio",
+    "TradeLogger writes structured logs to both file and console",
+    "Backtester can process a list of OHLC candles and produce trade statistics",
+    "main.py is executable and handles --backtest and --config CLI arguments",
+    "All modules import cleanly: python -c 'from ict_bot.entry_model import EntryModel; from ict_bot.risk_management import calculate_position_size; from ict_bot.mt5_connector import MT5Connector; from ict_bot.telegram_notifier import TelegramNotifier; from ict_bot.backtester import Backtester'"
+  ],
+  "verification": [
+    "python -c 'from ict_bot.entry_model import EntryModel; from ict_bot.risk_management import calculate_position_size, check_daily_loss_limit; from ict_bot.mt5_connector import MT5Connector; from ict_bot.telegram_notifier import TelegramNotifier; from ict_bot.logger import TradeLogger; from ict_bot.backtester import Backtester; print(\"All imports OK\")'",
+    "python main.py --help || python main.py --backtest --config config/config_example.yaml 2>&1 | head -20",
+    "python -m py_compile ict_bot/entry_model.py && python -m py_compile ict_bot/risk_management.py && python -m py_compile ict_bot/mt5_connector.py && python -m py_compile ict_bot/telegram_notifier.py && python -m py_compile ict_bot/logger.py && python -m py_compile ict_bot/backtester.py"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
