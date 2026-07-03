@@ -39,7 +39,7 @@ input double   VolumeStep       = 0.01;     // Volume step
 input int      HTFLookback      = 20;       // HTF daily candles for bias
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
-input int      ServerUTCOffset  = -1;       // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset)
+input int      ServerUTCOffset  = 3;        // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset; 3 = Fusion Markets summer/UTC+3)
 input bool     DebugMode        = true;      // Enable verbose debug logging
 
 //+------------------------------------------------------------------+
@@ -205,6 +205,9 @@ double     g_day_start_balance = 0.0;
 // Last processed bar time (to avoid duplicate processing)
 datetime   g_last_bar_time = 0;
 
+// Bar counter for verbose debug in first 100 bars
+int        g_bar_counter = 0;
+
 // Track if we have an active pending order or position
 bool       g_has_active_trade = false;
 
@@ -293,6 +296,20 @@ int GetETOffsetHours(datetime dt)
 //+------------------------------------------------------------------+
 int GetBrokerUTCOffsetSeconds()
 {
+   // In Strategy Tester, TimeGMTOffset() ALWAYS returns 0 (known MT5 limitation).
+   // We must use the manual ServerUTCOffset when running in tester mode.
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      // In tester: always use manual offset (never trust TimeGMTOffset which is 0)
+      if(ServerUTCOffset == -1)
+      {
+         Print("ICT Bot WARNING: Running in Strategy Tester with ServerUTCOffset=-1 (auto).",
+               " TimeGMTOffset() returns 0 in tester! Using 0. Set ServerUTCOffset manually!");
+         return 0;
+      }
+      return ServerUTCOffset * 3600;
+   }
+   
    if(ServerUTCOffset == -1)
    {
       // Auto-detect: TimeGMTOffset() returns broker's offset from GMT in seconds
@@ -1717,6 +1734,7 @@ int OnInit()
    // Initialize state
    ResetEntryModel();
    g_last_bar_time = 0;
+   g_bar_counter = 0;
    g_daily_pnl = 0.0;
    g_current_day = 0;
    g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -1724,7 +1742,13 @@ int OnInit()
    g_has_active_trade = false;
    
    // Set timer for 1-second polling to detect new bars
-   EventSetTimer(1);
+   // Note: EventSetTimer may not fire in Strategy Tester, but OnTick is always
+   // called on each tick in the tester, so CheckForNewBar() will be invoked
+   // regardless. The timer is a fallback for live trading with illiquid symbols.
+   if(!MQLInfoInteger(MQL_TESTER))
+      EventSetTimer(1);
+   else
+      Print("ICT Bot: Running in Strategy Tester - timer disabled, using OnTick only");
    
    // Initial HTF range update
    UpdateHTFRange();
@@ -1742,6 +1766,7 @@ int OnInit()
    Print("ICT Bot:   Detected broker offset=", broker_offset_sec/3600, " hours (",
          broker_offset_sec, " seconds)");
    Print("ICT Bot:   TimeGMTOffset()=", (int)TimeGMTOffset(), " seconds");
+   Print("ICT Bot:   MQL_TESTER=", (MQLInfoInteger(MQL_TESTER) ? "YES" : "NO"));
    Print("ICT Bot:   Current server time=", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    
    // Show what ET time is right now for verification
@@ -1756,6 +1781,37 @@ int OnInit()
    if(g_htf_range_valid)
       Print("ICT Bot:   HTF High=", DoubleToString(g_htf_swing_high, _Digits),
             ", HTF Low=", DoubleToString(g_htf_swing_low, _Digits));
+   
+   // Print Kill Zone times in SERVER time for verification
+   // ET -> UTC -> Server: server_time = ET_time - ET_offset + broker_offset
+   // For June (EDT = UTC-4), with broker at UTC+3: offset from ET = +7 hours
+   int et_offset_hours = GetETOffsetHours(TimeCurrent() - broker_offset_sec); // approximate
+   int server_offset_from_et = broker_offset_sec / 3600 - et_offset_hours; // e.g. 3 - (-4) = 7
+   Print("ICT Bot: ----------------------------------------");
+   Print("ICT Bot: Kill Zone times in SERVER time (ET offset=", et_offset_hours,
+         "h, server-ET shift=+", server_offset_from_et, "h):");
+   // Asian: 20:00 - 00:00 ET
+   Print("ICT Bot:   Asian  : server ",
+         StringFormat("%02d:%02d", (20 + server_offset_from_et) % 24, 0), " - ",
+         StringFormat("%02d:%02d", (0 + server_offset_from_et) % 24, 0),
+         " (ET 20:00-00:00)");
+   // London: 02:00 - 05:00 ET
+   Print("ICT Bot:   London : server ",
+         StringFormat("%02d:%02d", (2 + server_offset_from_et) % 24, 0), " - ",
+         StringFormat("%02d:%02d", (5 + server_offset_from_et) % 24, 0),
+         " (ET 02:00-05:00)");
+   // NY AM: 10:00 - 11:00 ET
+   Print("ICT Bot:   NY AM  : server ",
+         StringFormat("%02d:%02d", (10 + server_offset_from_et) % 24, 0), " - ",
+         StringFormat("%02d:%02d", (11 + server_offset_from_et) % 24, 0),
+         " (ET 10:00-11:00)");
+   // NY PM: 13:30 - 16:00 ET
+   Print("ICT Bot:   NY PM  : server ",
+         StringFormat("%02d:%02d", (13 + server_offset_from_et) % 24, 30), " - ",
+         StringFormat("%02d:%02d", (16 + server_offset_from_et) % 24, 0),
+         " (ET 13:30-16:00)");
+   Print("ICT Bot: ----------------------------------------");
+   Print("ICT Bot: NOTE: If server times look wrong, adjust ServerUTCOffset input.");
    Print("ICT Bot: ========================================");
    
    return INIT_SUCCEEDED;
@@ -1815,6 +1871,9 @@ void CheckForNewBar()
    
    g_last_bar_time = current_bar_time;
    
+   // Increment bar counter for first-100-bars verbose debug
+   g_bar_counter++;
+   
    // Get the COMPLETED bar (index 1 = previous bar)
    MqlRates rates[];
    if(CopyRates(_Symbol, PERIOD_M1, 1, 1, rates) != 1)
@@ -1836,11 +1895,29 @@ void CheckForNewBar()
    // Only look for new entries if no active trade
    // Corresponds to: backtester.py "if active_trade is None"
    if(g_has_active_trade)
+   {
+      if(g_bar_counter <= 100)
+         Print("ICT Bar[", g_bar_counter, "]: SKIP (active trade/order)",
+               " | ServerTime=", TimeToString(candle.time, TIME_DATE|TIME_MINUTES));
       return;
+   }
    
    // Check kill zone
    // Corresponds to: backtester.py is_in_kill_zone() check
    string kz_name = GetActiveKillZone(candle.time);
+   
+   // Verbose debug for first 100 bars: show server time, ET time, kill zone, buffer, state
+   if(g_bar_counter <= 100)
+   {
+      int dbg_et_h, dbg_et_m;
+      ServerTimeToET(candle.time, dbg_et_h, dbg_et_m);
+      Print("ICT Bar[", g_bar_counter, "]: ServerTime=", TimeToString(candle.time, TIME_DATE|TIME_MINUTES),
+            " | ET=", StringFormat("%02d:%02d", dbg_et_h, dbg_et_m),
+            " | KZ=", (kz_name == "" ? "NONE" : kz_name),
+            " | Buffer=", g_buffer_count,
+            " | State=", EnumToString(g_state),
+            " | BrokerOffset=", GetBrokerUTCOffsetSeconds()/3600, "h");
+   }
    
    if(kz_name == "")
    {
