@@ -2,7 +2,7 @@
   "id": "FEAT-007",
   "type": "fix",
   "description": "Improve backtest data loading error reporting and path resolution. Print actual exception and absolute path being tried. Try path as-is, then with .csv extension, then relative to config directory.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Modify backtester.py load_data() to return detailed error info (exception message, paths tried)",
     "In backtester.py load_data(), try the path as-is first, then with .csv appended, then relative to the script directory",
@@ -22,5 +22,5 @@
     "python3 -m py_compile main.py"
   ],
   "blocked_reason": null,
-  "findings": null
+  "findings": "Implemented multi-path resolution in backtester.py load_data(). The method now tries 6 path candidates (original, +.csv, config-dir relative, config-dir +.csv, project-root relative, project-root +.csv) and prints the absolute path for each attempt. On failure it prints the actual exception. main.py run_backtest() now passes the config directory and prints detailed diagnostics including all errors and a hint about supported formats. All 114 existing tests pass unchanged."
 }
