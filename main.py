@@ -3,30 +3,314 @@ ICT Trading Bot - Main Entry Point
 
 An automated trading bot implementing Inner Circle Trader (ICT) concepts
 for NAS100 (US100) using MetaTrader 5.
+
+Usage:
+    python main.py --config config/config_example.yaml
+    python main.py --backtest --config config/config_example.yaml
+    python main.py --help
 """
 
-from ict_bot import (
-    market_structure,
-    order_blocks,
-    fvg,
-    liquidity,
-    kill_zones,
-    ote,
-    premium_discount,
+import argparse
+import sys
+import time
+from datetime import datetime
+
+import yaml
+
+from ict_bot.mt5_connector import MT5Connector
+from ict_bot.telegram_notifier import TelegramNotifier
+from ict_bot.logger import TradeLogger
+from ict_bot.entry_model import EntryModel
+from ict_bot.backtester import Backtester
+from ict_bot.kill_zones import is_in_kill_zone, get_active_kill_zone
+from ict_bot.risk_management import (
+    calculate_position_size,
+    check_daily_loss_limit,
+    can_take_trade,
 )
+from ict_bot import market_structure, fvg, liquidity
+
+
+def load_config(config_path):
+    """
+    Load configuration from a YAML file.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the YAML configuration file.
+
+    Returns
+    -------
+    dict
+        Configuration dictionary.
+    """
+    try:
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        print(f"Error: Invalid YAML in config file: {e}")
+        sys.exit(1)
+
+
+def run_backtest(config):
+    """
+    Run the backtesting engine.
+
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary with backtest settings.
+    """
+    logger = TradeLogger(log_dir="logs")
+    logger.log_analysis("SYSTEM", "backtest_start", "Starting backtest")
+
+    initial_balance = config.get("risk", {}).get("initial_balance", 10000)
+    risk_percent = config.get("risk", {}).get("risk_per_trade", 0.01)
+    max_daily_loss = config.get("risk", {}).get("max_daily_loss", 0.03)
+
+    backtester = Backtester(
+        initial_balance=initial_balance,
+        risk_percent=risk_percent,
+        max_daily_loss=max_daily_loss,
+    )
+
+    # Load data from config or default path
+    data_path = config.get("backtest", {}).get("data_file", None)
+    if data_path:
+        loaded = backtester.load_data(data_path)
+        if not loaded:
+            print(f"Error: Could not load backtest data from {data_path}")
+            sys.exit(1)
+    else:
+        print("No backtest data file specified in config.")
+        print("Add 'backtest.data_file' to your config YAML with a path to CSV data.")
+        print("\nExpected CSV format: time,open,high,low,close")
+        print("Example config:")
+        print("  backtest:")
+        print("    data_file: data/US100_M1.csv")
+        print("    start_date: '2024-01-01'")
+        print("    end_date: '2024-03-01'")
+        return
+
+    start_date = config.get("backtest", {}).get("start_date", None)
+    end_date = config.get("backtest", {}).get("end_date", None)
+
+    print("Running backtest...")
+    results = backtester.run(start_date=start_date, end_date=end_date)
+
+    # Display results
+    print("\n" + "=" * 50)
+    print("BACKTEST RESULTS")
+    print("=" * 50)
+    print(f"Total Trades:   {results['total_trades']}")
+    print(f"Wins:           {results['wins']}")
+    print(f"Losses:         {results['losses']}")
+    print(f"Win Rate:       {results['win_rate']:.1f}%")
+    print(f"Profit Factor:  {results['profit_factor']:.2f}")
+    print(f"Max Drawdown:   {results['max_drawdown']*100:.2f}%")
+    print(f"Avg R:R:        {results['avg_rr']:.2f}")
+    print(f"Net Profit:     ${results['net_profit']:.2f}")
+    print(f"Final Balance:  ${results['final_balance']:.2f}")
+    print("=" * 50)
+
+    logger.log_analysis("SYSTEM", "backtest_complete", results)
+
+
+def run_live(config):
+    """
+    Run the live trading loop.
+
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary.
+    """
+    # Initialize components
+    mt5_config = config.get("mt5", {})
+    telegram_config = config.get("telegram", {})
+    risk_config = config.get("risk", {})
+
+    # MT5 Connector
+    connector = MT5Connector()
+    result = connector.connect(
+        login=mt5_config.get("login"),
+        password=mt5_config.get("password"),
+        server=mt5_config.get("server"),
+    )
+    if not result["success"]:
+        print(f"MT5 Connection: {result['message']}")
+        print("Continuing in monitoring mode (no live trading)...")
+
+    # Telegram Notifier
+    notifier = TelegramNotifier(
+        bot_token=telegram_config.get("bot_token"),
+        chat_id=telegram_config.get("chat_id"),
+    )
+
+    # Logger
+    logger = TradeLogger(log_dir="logs")
+
+    # Entry Model
+    entry_model = EntryModel()
+
+    # Trading parameters
+    symbol = mt5_config.get("symbol", "US100")
+    risk_percent = risk_config.get("risk_per_trade", 0.01)
+    max_daily_loss_pct = risk_config.get("max_daily_loss", 0.03)
+
+    logger.log_analysis("SYSTEM", "startup", f"ICT Bot started for {symbol}")
+    notifier.send_alert(f"ICT Bot started for {symbol}")
+
+    daily_pnl = 0.0
+    current_day = datetime.now().date()
+
+    print(f"ICT Trading Bot running for {symbol}")
+    print("Press Ctrl+C to stop")
+    print("-" * 40)
+
+    try:
+        while True:
+            now = datetime.now()
+
+            # Reset daily stats at start of new day
+            if now.date() != current_day:
+                summary = logger.log_daily_summary()
+                notifier.send_daily_summary(summary)
+                logger.reset_daily()
+                daily_pnl = 0.0
+                current_day = now.date()
+
+            # Check if we are in a kill zone
+            active_kz = get_active_kill_zone(now)
+            if active_kz is None:
+                entry_model.reset()
+                time.sleep(60)  # Check every minute outside kill zones
+                continue
+
+            # Check daily loss limit
+            account_info = connector.get_account_info()
+            balance = account_info["balance"] if account_info else 10000
+            if not can_take_trade(daily_pnl, balance, max_daily_loss_pct):
+                logger.log_analysis("M1", "risk_check",
+                                    "Daily loss limit reached, pausing")
+                time.sleep(60)
+                continue
+
+            # Fetch 1m candles for entry model
+            candles = connector.get_candles(symbol, "M1", 1)
+            if candles is not None and not candles.empty:
+                latest = candles.iloc[-1]
+                candle_data = {
+                    "time": latest["time"],
+                    "open": latest["open"],
+                    "high": latest["high"],
+                    "low": latest["low"],
+                    "close": latest["close"],
+                }
+
+                signal = entry_model.update(candle_data)
+
+                if signal is not None:
+                    logger.log_analysis("M1", "entry_signal", signal)
+
+                    # Calculate position size
+                    symbol_info = connector.get_symbol_info(symbol)
+                    pos_size = calculate_position_size(
+                        balance, risk_percent,
+                        signal["entry_price"],
+                        signal["stop_loss"],
+                        symbol_info,
+                    )
+
+                    if pos_size["valid"]:
+                        # Determine order type
+                        order_type = ("buy_limit" if signal["direction"] == "long"
+                                      else "sell_limit")
+
+                        # Place order
+                        order_result = connector.place_order(
+                            symbol=symbol,
+                            order_type=order_type,
+                            volume=pos_size["volume"],
+                            price=signal["entry_price"],
+                            sl=signal["stop_loss"],
+                            tp=signal["take_profit"],
+                            comment=f"ICT_{active_kz}",
+                        )
+
+                        trade_details = {
+                            "direction": signal["direction"],
+                            "symbol": symbol,
+                            "entry_price": signal["entry_price"],
+                            "stop_loss": signal["stop_loss"],
+                            "take_profit": signal["take_profit"],
+                            "volume": pos_size["volume"],
+                            "risk_reward": signal["risk_reward"],
+                            "rationale": {
+                                "sweep": signal["sweep_info"]["type"],
+                                "mss": signal["mss_info"]["type"],
+                                "fvg": signal["fvg_info"]["type"],
+                                "kill_zone": active_kz,
+                            },
+                        }
+
+                        if order_result["success"]:
+                            logger.log_trade_entry(trade_details)
+                            notifier.send_trade_entry(trade_details)
+                        else:
+                            logger.log_analysis(
+                                "M1", "order_failed", order_result["message"]
+                            )
+
+                    entry_model.reset()
+
+            # Wait for next candle (poll every 10 seconds)
+            time.sleep(10)
+
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        summary = logger.log_daily_summary()
+        notifier.send_daily_summary(summary)
+        connector.disconnect()
+        print("ICT Trading Bot stopped.")
 
 
 def main():
-    """Main entry point for the ICT trading bot."""
-    print("ICT Trading Bot - NAS100")
-    print("Modules loaded:")
-    print(f"  - market_structure: {market_structure.__name__}")
-    print(f"  - order_blocks: {order_blocks.__name__}")
-    print(f"  - fvg: {fvg.__name__}")
-    print(f"  - liquidity: {liquidity.__name__}")
-    print(f"  - kill_zones: {kill_zones.__name__}")
-    print(f"  - ote: {ote.__name__}")
-    print(f"  - premium_discount: {premium_discount.__name__}")
+    """Main entry point with CLI argument parsing."""
+    parser = argparse.ArgumentParser(
+        description="ICT Trading Bot - NAS100 automated trading using ICT concepts",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python main.py --config config/config_example.yaml\n"
+            "  python main.py --backtest --config config/config_example.yaml\n"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config/config_example.yaml",
+        help="Path to YAML configuration file (default: config/config_example.yaml)",
+    )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run in backtest mode instead of live trading",
+    )
+
+    args = parser.parse_args()
+
+    # Load configuration
+    config = load_config(args.config)
+
+    if args.backtest:
+        run_backtest(config)
+    else:
+        run_live(config)
 
 
 if __name__ == "__main__":
