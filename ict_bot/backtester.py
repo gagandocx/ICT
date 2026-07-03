@@ -12,9 +12,11 @@ Supports two input formats:
      - Tick data is automatically converted to 1-minute OHLC candles using mid price (bid+ask)/2
 """
 
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 
 from ict_bot.entry_model import EntryModel
 from ict_bot.kill_zones import is_in_kill_zone, get_active_kill_zone
@@ -55,7 +57,7 @@ class Backtester:
         self.equity_curve = []
         self.results = None
 
-    def load_data(self, csv_file_or_dataframe):
+    def load_data(self, csv_file_or_dataframe, config_dir=None):
         """
         Load historical data for backtesting.
 
@@ -67,24 +69,41 @@ class Backtester:
         For tick data, ticks are aggregated into 1-minute OHLC candles using
         the mid price ((bid + ask) / 2).
 
+        Path resolution order (when csv_file_or_dataframe is a string):
+          1. Try the path exactly as given
+          2. Try the path with '.csv' extension appended
+          3. Try the path relative to config_dir (if provided)
+          4. Try the path relative to config_dir with '.csv' extension appended
+          5. Try the path relative to this script's directory
+          6. Try the path relative to this script's directory with '.csv' extension
+
         Parameters
         ----------
         csv_file_or_dataframe : str or pd.DataFrame
             Either a path to a CSV file or a pandas DataFrame.
+        config_dir : str or Path or None
+            Optional directory of the config file. Used as a base for relative
+            path resolution.
 
         Returns
         -------
         bool
             True if data loaded successfully, False otherwise.
         """
+        # Store error info for diagnostics
+        self._load_errors = []
+
         if isinstance(csv_file_or_dataframe, pd.DataFrame):
             raw = csv_file_or_dataframe.copy()
         elif isinstance(csv_file_or_dataframe, str):
-            try:
-                raw = pd.read_csv(csv_file_or_dataframe)
-            except (FileNotFoundError, pd.errors.EmptyDataError):
+            raw = self._resolve_and_read(csv_file_or_dataframe, config_dir)
+            if raw is None:
                 return False
         else:
+            self._load_errors.append(
+                f"Invalid input type: {type(csv_file_or_dataframe).__name__}. "
+                "Expected a file path (str) or pandas DataFrame."
+            )
             return False
 
         # Auto-detect format based on column headers
@@ -116,6 +135,87 @@ class Backtester:
 
         self.data = raw.sort_values("time").reset_index(drop=True)
         return True
+
+    def _resolve_and_read(self, file_path, config_dir=None):
+        """
+        Try multiple path resolutions to find and read a CSV file.
+
+        Prints the absolute path being tried for each attempt, and prints the
+        actual exception message on failure.
+
+        Parameters
+        ----------
+        file_path : str
+            The original file path (may be relative, may lack .csv extension).
+        config_dir : str or Path or None
+            Optional config directory for relative path resolution.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Loaded DataFrame, or None if all attempts fail.
+        """
+        candidates = []
+
+        # 1. Path as given
+        candidates.append(Path(file_path))
+        # 2. Path with .csv extension
+        if not file_path.lower().endswith(".csv"):
+            candidates.append(Path(file_path + ".csv"))
+
+        # 3-4. Relative to config_dir
+        if config_dir is not None:
+            config_dir = Path(config_dir)
+            candidates.append(config_dir / file_path)
+            if not file_path.lower().endswith(".csv"):
+                candidates.append(config_dir / (file_path + ".csv"))
+
+        # 5-6. Relative to this script's directory (ict_bot/)
+        script_dir = Path(__file__).resolve().parent.parent
+        candidates.append(script_dir / file_path)
+        if not file_path.lower().endswith(".csv"):
+            candidates.append(script_dir / (file_path + ".csv"))
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_candidates = []
+        for c in candidates:
+            resolved = c.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                unique_candidates.append(c)
+
+        for candidate in unique_candidates:
+            abs_path = candidate.resolve()
+            print(f"[Backtester] Trying to load data from: {abs_path}")
+            try:
+                raw = pd.read_csv(str(abs_path))
+                print(f"[Backtester] Successfully loaded data from: {abs_path}")
+                return raw
+            except FileNotFoundError:
+                self._load_errors.append(f"File not found: {abs_path}")
+            except pd.errors.EmptyDataError as e:
+                self._load_errors.append(f"Empty data file: {abs_path} ({e})")
+            except Exception as e:
+                self._load_errors.append(f"Error reading {abs_path}: {type(e).__name__}: {e}")
+
+        # All attempts failed - print summary
+        print(f"[Backtester] Failed to load data file: {file_path}")
+        print(f"[Backtester] Tried {len(unique_candidates)} path(s):")
+        for err in self._load_errors:
+            print(f"  - {err}")
+        return None
+
+    def get_load_errors(self):
+        """
+        Return the list of errors encountered during the last load_data call.
+
+        Returns
+        -------
+        list of str
+            Error messages from the most recent load attempt.
+        """
+        return getattr(self, "_load_errors", [])
 
     @staticmethod
     def _convert_ticks_to_ohlc(tick_df):

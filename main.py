@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime
@@ -52,8 +53,6 @@ def load_config(config_path):
     dict
         Configuration dictionary.
     """
-    import os
-
     try:
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
@@ -66,6 +65,9 @@ def load_config(config_path):
 
     if config is None:
         config = {}
+
+    # Store config file path for downstream path resolution
+    config["_config_path"] = config_path
 
     # Apply environment variable overrides for sensitive credentials
     if "mt5" not in config:
@@ -112,9 +114,25 @@ def run_backtest(config):
     # Load data from config or default path
     data_path = config.get("backtest", {}).get("data_file", None)
     if data_path:
-        loaded = backtester.load_data(data_path)
+        # Determine config directory for relative path resolution
+        config_path = config.get("_config_path", None)
+        config_dir = None
+        if config_path:
+            config_dir = os.path.dirname(os.path.abspath(config_path))
+
+        loaded = backtester.load_data(data_path, config_dir=config_dir)
         if not loaded:
-            print(f"Error: Could not load backtest data from {data_path}")
+            print(f"\nError: Could not load backtest data from '{data_path}'")
+            errors = backtester.get_load_errors()
+            if errors:
+                print("Details:")
+                for err in errors:
+                    print(f"  - {err}")
+            print(f"\nHint: Make sure the file exists at the specified path.")
+            print(f"  The file can be a CSV with or without .csv extension.")
+            print(f"  Supported formats:")
+            print(f"    - OHLC: time,open,high,low,close")
+            print(f"    - Tick: time_msc,bid,ask,last,volume,flags,flags_str,volume_real")
             sys.exit(1)
     else:
         print("No backtest data file specified in config.")

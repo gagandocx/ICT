@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-007",
+  "type": "fix",
+  "description": "Improve backtest data loading error reporting and path resolution. Print actual exception and absolute path being tried. Try path as-is, then with .csv extension, then relative to config directory.",
+  "status": "in_progress",
+  "steps": [
+    "Modify backtester.py load_data() to return detailed error info (exception message, paths tried)",
+    "In backtester.py load_data(), try the path as-is first, then with .csv appended, then relative to the script directory",
+    "Print the absolute path being tried during load attempts",
+    "Modify main.py run_backtest() to print detailed error info when load_data fails"
+  ],
+  "acceptance_criteria": [
+    "load_data prints the actual exception when pd.read_csv fails",
+    "load_data tries the path as-is, then with .csv extension appended, then relative to config/script directory",
+    "load_data prints the absolute path it is attempting to load",
+    "run_backtest in main.py shows useful debugging info (path tried, exception) on failure",
+    "All existing tests still pass"
+  ],
+  "verification": [
+    "python3 -m pytest tests/ -v --tb=short",
+    "python3 -m py_compile ict_bot/backtester.py",
+    "python3 -m py_compile main.py"
+  ],
+  "blocked_reason": null,
+  "findings": null
+}
