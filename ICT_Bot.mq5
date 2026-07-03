@@ -36,7 +36,7 @@ input double   ContractSize     = 1.0;      // Contract size for position sizing
 input double   VolumeMin        = 0.01;     // Minimum volume
 input double   VolumeMax        = 100.0;    // Maximum volume
 input double   VolumeStep       = 0.01;     // Volume step
-input int      HTFLookback      = 20;       // HTF daily candles for bias
+input int      HTFLookback      = 5;        // HTF daily candles for bias (5 = tighter recent range matching Python's effective behavior)
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
 input int      ServerUTCOffset  = 3;        // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset; 3 = Fusion Markets summer/UTC+3)
@@ -210,6 +210,10 @@ int        g_bar_counter = 0;
 
 // Track if we have an active pending order or position
 bool       g_has_active_trade = false;
+
+// Track the previous kill zone name for stale order cancellation
+// When transitioning to a DIFFERENT kill zone, cancel pending orders from prior zone
+string     g_previous_kill_zone = "";
 
 //+------------------------------------------------------------------+
 //| Kill Zone Time Windows (ET/Eastern Time)                           |
@@ -460,8 +464,11 @@ void ResetEntryModel()
    g_mss_valid   = false;
    g_fvg_valid   = false;
    
-   // Cancel any stale pending orders from prior state machine cycle
-   CancelPendingOrders();
+   // NOTE: We do NOT call CancelPendingOrders() here.
+   // Previously this was called on every reset which would cancel orders
+   // that were JUST placed (since ProcessNewCandle calls ResetEntryModel
+   // after PlaceLimitOrder). Stale orders are now cancelled only when
+   // transitioning to a DIFFERENT kill zone - see CheckForNewBar().
 }
 
 //+------------------------------------------------------------------+
@@ -1717,6 +1724,12 @@ void ProcessNewCandle(const CandleData &candle, string kz_name)
                      " | OB=", (signal.ob_confluence ? "Yes" : "No"));
             
             PlaceLimitOrder(signal);
+            
+            // BUG 3 FIX: Mark that we have an active trade immediately after
+            // placing the order. Without this, the EA would continue looking for
+            // new entries on subsequent candles until HasActiveTradeOrOrder()
+            // detected the pending order on the next tick.
+            g_has_active_trade = true;
          }
       }
       else
@@ -1951,8 +1964,23 @@ void CheckForNewBar()
          }
          ResetEntryModel();
       }
+      g_previous_kill_zone = "";
       return;
    }
+   
+   // Cancel stale pending orders when transitioning to a DIFFERENT kill zone.
+   // This prevents leftover limit orders from a prior session lingering, while
+   // NOT cancelling orders placed within the SAME kill zone (which was the bug:
+   // ResetEntryModel used to call CancelPendingOrders on every reset, including
+   // immediately after PlaceLimitOrder).
+   if(g_previous_kill_zone != "" && g_previous_kill_zone != kz_name)
+   {
+      if(DebugMode)
+         Print("ICT Debug: [KZ TRANSITION] ", g_previous_kill_zone, " -> ", kz_name,
+               " | Cancelling stale pending orders from prior kill zone");
+      CancelPendingOrders();
+   }
+   g_previous_kill_zone = kz_name;
    
    // Check daily loss limit before processing
    // Corresponds to: backtester.py daily loss check
