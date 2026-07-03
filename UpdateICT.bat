@@ -34,36 +34,42 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-REM --- Create target directory if it does not exist ---
-if not exist "%INSTALL_DIR%" (
-    echo [INFO] Creating install directory: %INSTALL_DIR%
-    mkdir "%INSTALL_DIR%"
-    if %ERRORLEVEL% neq 0 (
-        echo [ERROR] Failed to create directory. Check drive/path permissions.
-        pause
-        exit /b 1
-    )
-)
-
 REM --- Clone or pull the latest code ---
 if exist "%INSTALL_DIR%\.git" (
     echo [INFO] Existing repo found. Pulling latest updates...
     pushd "%INSTALL_DIR%"
     git fetch origin
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] Git fetch failed. Check your internet connection.
+        popd
+        pause
+        exit /b 1
+    )
     git reset --hard origin/main
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] Git reset failed. The repository may be corrupted.
+        popd
+        pause
+        exit /b 1
+    )
     git clean -fd
     popd
     echo [OK] Repository updated to latest version.
 ) else (
     echo [INFO] No existing repo found. Cloning fresh copy...
-    REM Remove any old files before cloning
-    if exist "%INSTALL_DIR%\main.py" (
-        echo [INFO] Removing old files from install directory...
+    REM If directory exists but is not a git repo, remove it entirely first
+    if exist "%INSTALL_DIR%" (
+        echo [INFO] Directory exists but is not a git repository. Removing old contents...
         rmdir /s /q "%INSTALL_DIR%"
-        mkdir "%INSTALL_DIR%"
+        if exist "%INSTALL_DIR%" (
+            echo [ERROR] Failed to remove existing directory: %INSTALL_DIR%
+            echo         Please close any programs using files in that folder and try again.
+            pause
+            exit /b 1
+        )
     )
     git clone "%REPO_URL%" "%INSTALL_DIR%"
-    if %ERRORLEVEL% neq 0 (
+    if !ERRORLEVEL! neq 0 (
         echo [ERROR] Git clone failed. Check your internet connection and repo URL.
         pause
         exit /b 1
@@ -73,12 +79,26 @@ if exist "%INSTALL_DIR%\.git" (
 
 echo.
 
+REM --- Verify critical files exist after clone/pull ---
+if not exist "%INSTALL_DIR%\main.py" (
+    echo [ERROR] main.py not found in %INSTALL_DIR%
+    echo         The clone or pull may have failed silently. Try deleting the folder and running again.
+    pause
+    exit /b 1
+)
+if not exist "%INSTALL_DIR%\requirements.txt" (
+    echo [ERROR] requirements.txt not found in %INSTALL_DIR%
+    echo         The clone or pull may have failed silently. Try deleting the folder and running again.
+    pause
+    exit /b 1
+)
+
 REM --- Install/Update Python dependencies ---
 echo [INFO] Installing/updating Python dependencies...
 pushd "%INSTALL_DIR%"
 %PYTHON% -m pip install --upgrade pip >nul 2>&1
 %PYTHON% -m pip install -r requirements.txt
-if %ERRORLEVEL% neq 0 (
+if !ERRORLEVEL! neq 0 (
     echo [WARNING] Some dependencies may have failed to install.
     echo          MetaTrader5 package requires Windows with MT5 terminal installed.
     echo          Other packages should install normally.
