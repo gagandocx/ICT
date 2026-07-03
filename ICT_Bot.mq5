@@ -1563,22 +1563,8 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    // Set deviation
    request.deviation = 10;
    
-   // Determine correct filling mode dynamically.
-   // In Strategy Tester, ORDER_FILLING_IOC may not be supported.
-   // Check the symbol's allowed filling modes and pick the best one.
-   long filling_mode = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
-   if((filling_mode & SYMBOL_FILLING_RETURN) == SYMBOL_FILLING_RETURN)
-      request.type_filling = ORDER_FILLING_RETURN;
-   else if((filling_mode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
-      request.type_filling = ORDER_FILLING_IOC;
-   else if((filling_mode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
-      request.type_filling = ORDER_FILLING_FOK;
-   else
-      request.type_filling = ORDER_FILLING_RETURN; // Default fallback for tester
-   
-   if(DebugMode)
-      Print("ICT Debug: [ORDER] Filling mode=", EnumToString(request.type_filling),
-            " | Symbol filling flags=", filling_mode);
+   // ORDER_FILLING_RETURN is always valid for pending orders (BUY_LIMIT/SELL_LIMIT)
+   request.type_filling = ORDER_FILLING_RETURN;
    
    bool sent = OrderSend(request, result);
    
