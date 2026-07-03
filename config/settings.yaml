@@ -1,3 +1,46 @@
+## MetaTrader 5 Connection
+## Sensitive values can be overridden via environment variables:
+##   ICT_MT5_LOGIN, ICT_MT5_PASSWORD, ICT_MT5_SERVER
+mt5:
+  login: 12345678
+  password: "your_password"
+  server: "FusionMarkets-Live"
+  symbol: "US100"
+
+## Telegram Notifications
+## Sensitive values can be overridden via environment variables:
+##   ICT_TELEGRAM_BOT_TOKEN, ICT_TELEGRAM_CHAT_ID
+telegram:
+  bot_token: "your_bot_token_here"
+  chat_id: "your_chat_id_here"
+
+risk:
+  risk_per_trade: 0.01
+  max_daily_loss: 0.03
+
+timeframes:
+  htf:
+    - D1
+    - H4
+  mtf:
+    - M15
+  ltf:
+    - M1
+
+kill_zones:
+  asian:
+    start: "20:00"
+    end: "00:00"
+  london:
+    start: "02:00"
+    end: "05:00"
+  ny_am:
+    start: "10:00"
+    end: "11:00"
+  ny_pm:
+    start: "13:30"
+    end: "16:00"
+
 ## Backtesting settings
 backtest:
   data_file: NAS100_RealTicks_20260601_20260630

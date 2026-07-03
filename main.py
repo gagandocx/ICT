@@ -5,8 +5,8 @@ An automated trading bot implementing Inner Circle Trader (ICT) concepts
 for NAS100 (US100) using MetaTrader 5.
 
 Usage:
-    python main.py --config config/config_example.yaml
-    python main.py --backtest --config config/config_example.yaml
+    python main.py --config config/settings.yaml
+    python main.py --backtest --config config/settings.yaml
     python main.py --help
 """
 
@@ -384,15 +384,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python main.py --config config/config_example.yaml\n"
-            "  python main.py --backtest --config config/config_example.yaml\n"
+            "  python main.py --config config/settings.yaml\n"
+            "  python main.py --backtest --config config/settings.yaml\n"
         ),
     )
     parser.add_argument(
         "--config",
         type=str,
-        default="config/config_example.yaml",
-        help="Path to YAML configuration file (default: config/config_example.yaml)",
+        default="config/settings.yaml",
+        help="Path to YAML configuration file (default: config/settings.yaml)",
     )
     parser.add_argument(
         "--backtest",
