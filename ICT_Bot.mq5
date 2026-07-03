@@ -1563,12 +1563,26 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    // Set deviation
    request.deviation = 10;
    
-   // Type filling
-   request.type_filling = ORDER_FILLING_IOC;
+   // Determine correct filling mode dynamically.
+   // In Strategy Tester, ORDER_FILLING_IOC may not be supported.
+   // Check the symbol's allowed filling modes and pick the best one.
+   long filling_mode = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling_mode & SYMBOL_FILLING_RETURN) == SYMBOL_FILLING_RETURN)
+      request.type_filling = ORDER_FILLING_RETURN;
+   else if((filling_mode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      request.type_filling = ORDER_FILLING_IOC;
+   else if((filling_mode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      request.type_filling = ORDER_FILLING_FOK;
+   else
+      request.type_filling = ORDER_FILLING_RETURN; // Default fallback for tester
+   
+   if(DebugMode)
+      Print("ICT Debug: [ORDER] Filling mode=", EnumToString(request.type_filling),
+            " | Symbol filling flags=", filling_mode);
    
    bool sent = OrderSend(request, result);
    
-   if(sent && result.retcode == TRADE_RETCODE_DONE)
+   if(sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
    {
       Print("ICT Bot: Order placed - ", signal.direction, " @ ", signal.entry_price,
             " SL: ", signal.stop_loss, " TP: ", signal.take_profit,
@@ -1579,8 +1593,16 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    }
    else
    {
-      Print("ICT Bot: Order failed - retcode: ", result.retcode,
-            " comment: ", result.comment);
+      Print("ICT Bot: Order FAILED - retcode: ", result.retcode,
+            " | comment: ", result.comment,
+            " | dir: ", signal.direction,
+            " | price: ", DoubleToString(signal.entry_price, _Digits),
+            " | sl: ", DoubleToString(signal.stop_loss, _Digits),
+            " | tp: ", DoubleToString(signal.take_profit, _Digits),
+            " | vol: ", DoubleToString(volume, 2),
+            " | filling: ", EnumToString(request.type_filling),
+            " | bid: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits),
+            " | ask: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_ASK), _Digits));
       return false;
    }
 }
@@ -1672,14 +1694,20 @@ void ProcessNewCandle(const CandleData &candle, string kz_name)
    // Add candle to buffer
    AddCandleToBuffer(candle);
    
-   // Advance state machine based on current state
-   // Corresponds to: entry_model.py update() state dispatch
-   if(g_state == STATE_WAITING_FOR_SWEEP)
-      CheckLiquiditySweep();
-   else if(g_state == STATE_WAITING_FOR_MSS)
-      CheckMSS();
-   else if(g_state == STATE_WAITING_FOR_FVG)
-      CheckFVG();
+   // Cascade state machine: allow multiple state transitions on a single candle.
+   // Previously used if/else-if which only advanced ONE state per candle. This caused
+   // missed trades when MSS was detected on the last kill zone candle (no next candle
+   // to check FVG before the kill zone reset).
+   ENUM_ENTRY_STATE prev_state;
+   do {
+      prev_state = g_state;
+      if(g_state == STATE_WAITING_FOR_SWEEP)
+         CheckLiquiditySweep();
+      if(g_state == STATE_WAITING_FOR_MSS)
+         CheckMSS();
+      if(g_state == STATE_WAITING_FOR_FVG)
+         CheckFVG();
+   } while(g_state != prev_state && g_state != STATE_READY_TO_ENTER);
    
    // Check if ready to enter
    if(g_state == STATE_READY_TO_ENTER)
