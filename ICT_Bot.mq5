@@ -37,7 +37,6 @@ input int      HTFLookback      = 20;       // HTF daily candles for bias (20 = 
 input int      HTFSwingLookback = 2;        // HTF swing detection lookback
 input double   SLBuffer         = 1.0;      // SL buffer beyond FVG candle (points)
 input int      ServerUTCOffset  = 3;        // Broker server UTC offset in hours (-1 = auto-detect via TimeGMTOffset; 3 = Fusion Markets summer/UTC+3)
-input bool     SpreadCompensation = true;    // Adjust TP for spread (match Python zero-spread backtest)
 input bool     DebugMode        = true;      // Enable verbose debug logging
 
 //+------------------------------------------------------------------+
@@ -1574,33 +1573,6 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    if(volume <= 0.0)
       return false; // Position too small
    
-   // --- Spread Compensation ---
-   // Python backtester uses zero spread, so TP is always reached based on raw price.
-   // MT5 checks TP against Bid (for longs) or Ask (for shorts), which includes spread.
-   // To match Python results, adjust TP by the current spread amount.
-   double adjusted_tp = signal.take_profit;
-   if(SpreadCompensation)
-   {
-      double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(signal.direction == "long")
-      {
-         // MT5 checks long TP against Bid (= Ask - spread). Reduce TP so it hits sooner.
-         adjusted_tp = signal.take_profit - spread;
-      }
-      else
-      {
-         // MT5 checks short TP against Ask (= Bid + spread). Increase TP so it hits sooner.
-         adjusted_tp = signal.take_profit + spread;
-      }
-      
-      if(DebugMode)
-         Print("ICT Debug: [SPREAD] Compensation applied",
-               " | Spread=", DoubleToString(spread, _Digits),
-               " | OriginalTP=", DoubleToString(signal.take_profit, _Digits),
-               " | AdjustedTP=", DoubleToString(adjusted_tp, _Digits),
-               " | Direction=", signal.direction);
-   }
-   
    MqlTradeRequest request;
    MqlTradeResult  result;
    ZeroMemory(request);
@@ -1611,7 +1583,7 @@ bool PlaceLimitOrder(const EntrySignal &signal)
    request.volume   = volume;
    request.price    = NormalizeDouble(signal.entry_price, _Digits); // FVG midpoint
    request.sl       = NormalizeDouble(signal.stop_loss, _Digits);
-   request.tp       = NormalizeDouble(adjusted_tp, _Digits);
+   request.tp       = NormalizeDouble(signal.take_profit, _Digits);
    request.magic    = 20240101; // Magic number for ICT Bot
    request.comment  = "ICT_" + signal.kill_zone_name;
    
@@ -1637,7 +1609,7 @@ bool PlaceLimitOrder(const EntrySignal &signal)
       Print("ICT Bot: Limit order placed - ", signal.direction,
             " @ ", DoubleToString(signal.entry_price, _Digits),
             " SL: ", DoubleToString(signal.stop_loss, _Digits),
-            " TP: ", DoubleToString(adjusted_tp, _Digits),
+            " TP: ", DoubleToString(signal.take_profit, _Digits),
             " Vol: ", DoubleToString(volume, 2),
             " KZ: ", signal.kill_zone_name,
             " OTE: ", (signal.ote_confluence ? "Yes" : "No"),
@@ -1651,7 +1623,7 @@ bool PlaceLimitOrder(const EntrySignal &signal)
             " | dir: ", signal.direction,
             " | price: ", DoubleToString(signal.entry_price, _Digits),
             " | sl: ", DoubleToString(signal.stop_loss, _Digits),
-            " | tp: ", DoubleToString(adjusted_tp, _Digits),
+            " | tp: ", DoubleToString(signal.take_profit, _Digits),
             " | vol: ", DoubleToString(volume, 2),
             " | filling: ", EnumToString(request.type_filling),
             " | bid: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits),
